@@ -1,13 +1,19 @@
 {
-  "name": "tauri-app",
+  "name": "recap-desktop",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "jest",
+    "test:e2e": "playwright test",
+    "build": "tauri build",
+    "dev": "tauri dev"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^1.4.0"
+    "@tauri-apps/cli": "^1.4.0",
+    "jest": "^29.7.0",
+    "playwright": "^1.40.0"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.6.0"
