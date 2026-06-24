@@ -43,7 +43,7 @@
   - `get_config`
   - `import_audio_file`
   - `get_supported_audio_formats`
-- [x] Unit tests for storage module (4 tests passing)
+- [x] Unit tests for storage and prompt modules (7 tests passing)
 - [x] Frontend UI implemented:
   - Meeting library view with list and refresh
   - Import view with file browser integration
@@ -52,9 +52,20 @@
   - Integration with Tauri commands (list_meetings, import_audio_file, get_supported_audio_formats)
 
 ### In Progress
-- [ ] Prompt manager and template library
+- [ ] Audio capture module (system audio + microphone)
+- [ ] Meeting detail view with transcript and summary display
+- [ ] Metadata entry dialog
+- [ ] Provider settings dialog (API key management)
+- [ ] Prompt editor UI
 
 ### Completed
+- [x] Prompt manager implemented:
+  - PromptTemplate struct with variable extraction
+  - Variable substitution engine
+  - Integration with SQLite storage
+  - Default templates (Meeting Summary, Action Items, Key Decisions)
+  - Template rendering with variable validation
+  - 3 unit tests for variable substitution
 - [x] Transcription module implemented:
   - STTProvider trait definition
   - STTRouter for provider selection

@@ -4,6 +4,7 @@
 mod audio_input;
 mod config;
 mod error;
+mod prompt_manager;
 mod storage;
 mod summarization;
 mod transcription;
