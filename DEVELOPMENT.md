@@ -3,7 +3,7 @@
 ## Project: Recap by ODW.ai
 
 **Repository:** https://github.com/OnDemandWorld/odw-recap  
-**Status:** Foundation phase (in progress)  
+**Status:** Core modules implemented (5/8 phases complete)  
 **Last Updated:** 2026-06-24
 
 ---

@@ -113,11 +113,40 @@
             </div>
 
             <div class="settings-group">
-              <h3>Prompt Templates</h3>
+              <h3>API Keys</h3>
               <div class="setting-item">
-                <button class="btn-secondary">Manage Templates</button>
+                <label>OpenAI API Key</label>
+                <input type="password" id="openai-api-key" placeholder="sk-..." />
+              </div>
+              <div class="setting-item">
+                <label>Anthropic API Key</label>
+                <input type="password" id="anthropic-api-key" placeholder="sk-ant-..." />
+              </div>
+              <div class="setting-item">
+                <label>Deepgram API Key</label>
+                <input type="password" id="deepgram-api-key" placeholder="..." />
+              </div>
+              <div class="setting-item">
+                <button id="save-api-keys-btn" class="btn-primary">Save API Keys</button>
               </div>
             </div>
+
+            <div class="settings-group">
+              <h3>Prompt Templates</h3>
+              <div class="setting-item">
+                <button id="create-template-btn" class="btn-secondary">Create New Template</button>
+              </div>
+              <div class="template-list" id="template-list">
+                <p class="placeholder-text">Default templates will be listed here...</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detail View -->
+        <div id="detail-view" class="view">
+          <div id="meeting-detail">
+            <p class="placeholder-text">Select a meeting to view details</p>
           </div>
         </div>
       </main>
