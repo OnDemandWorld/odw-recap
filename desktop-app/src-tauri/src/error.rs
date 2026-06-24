@@ -21,6 +21,9 @@ pub enum RecapError {
     #[error("Summarization error: {0}")]
     Summarization(String),
 
+    #[error("Sync error: {0}")]
+    Sync(String),
+
     #[error("Provider error ({provider}): {message}")]
     Provider { provider: String, message: String },
 

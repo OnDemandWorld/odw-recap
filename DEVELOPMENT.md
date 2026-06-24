@@ -52,12 +52,36 @@
   - Integration with Tauri commands (list_meetings, import_audio_file, get_supported_audio_formats)
 
 ### In Progress
-- [ ] Meeting detail view with transcript and summary display
-- [ ] Metadata entry dialog
-- [ ] Provider settings dialog (API key management)
-- [ ] Prompt editor UI
+- [ ] Testing and packaging (integration tests, E2E tests, packaging)
 
 ### Completed
+- [x] Team server (Go backend) implemented:
+  - HTTP server with Chi framework
+  - JWT authentication (register/login)
+  - RBAC middleware (admin/member roles)
+  - PostgreSQL database with migrations
+  - Redis integration
+  - Meetings CRUD API
+  - Sync API for desktop app integration
+  - Admin dashboard endpoints (users, audit log, stats)
+  - Health check endpoint
+  - CORS middleware
+- [x] Sync engine and integrations implemented:
+  - SyncClient for team server communication
+  - SyncEngine for desktop app
+  - Vault/Loop integration stubs
+  - Mobile companion sync types
+  - iOS Shortcuts integration types
+- [x] Desktop UI fully implemented:
+  - Meeting library view with list and refresh
+  - Import view with file browser integration
+  - Settings view with provider selection (STT/LLM)
+  - Meeting detail view with transcript, summary, action items, decisions
+  - API key management interface
+  - Prompt template management UI
+  - Navigation between all views
+  - Basic styling and navigation
+  - Integration with Tauri commands
 - [x] Audio capture module implemented:
   - AudioRecorder for microphone input
   - SystemAudioCapture for desktop audio

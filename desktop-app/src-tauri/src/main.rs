@@ -8,6 +8,7 @@ mod error;
 mod prompt_manager;
 mod storage;
 mod summarization;
+mod sync;
 mod transcription;
 
 use std::path::PathBuf;
