@@ -52,13 +52,18 @@
   - Integration with Tauri commands (list_meetings, import_audio_file, get_supported_audio_formats)
 
 ### In Progress
-- [ ] Audio capture module (system audio + microphone)
 - [ ] Meeting detail view with transcript and summary display
 - [ ] Metadata entry dialog
 - [ ] Provider settings dialog (API key management)
 - [ ] Prompt editor UI
 
 ### Completed
+- [x] Audio capture module implemented:
+  - AudioRecorder for microphone input
+  - SystemAudioCapture for desktop audio
+  - Recording configuration (sample rate, channels, device selection)
+  - Stub implementations (would integrate cpal for real audio I/O)
+  - Device enumeration support
 - [x] Prompt manager implemented:
   - PromptTemplate struct with variable extraction
   - Variable substitution engine
