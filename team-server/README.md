@@ -49,6 +49,16 @@ cd team-server
 go build -o recap-team-server ./cmd/server
 ```
 
+## Testing
+
+```bash
+go test ./...
+```
+
+## Status
+
+Core API, auth, and database migrations are implemented. Remaining work includes audit logging middleware, organization management, and real-time sync processing.
+
 ## API Endpoints
 
 ### Public

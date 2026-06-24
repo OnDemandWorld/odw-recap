@@ -19,3 +19,14 @@ dist/
 build/
 node_modules/
 *.log
+
+# Go build artifacts
+team-server/recap-team-server
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Coverage
+coverage/
+*.out
