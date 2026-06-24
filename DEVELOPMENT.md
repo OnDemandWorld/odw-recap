@@ -52,7 +52,6 @@
   - Integration with Tauri commands (list_meetings, import_audio_file, get_supported_audio_formats)
 
 ### In Progress
-- [ ] Summarization module and LLM providers
 - [ ] Prompt manager and template library
 
 ### Completed
@@ -66,6 +65,17 @@
   - AWS Transcribe provider (stub)
   - Azure Speech provider (stub)
   - Google Speech-to-Text provider (stub)
+- [x] Summarization module implemented:
+  - LLMProvider trait definition
+  - LLMRouter for provider selection
+  - Rule-based summarizer (extractive method)
+  - LlamaLocalProvider (stub implementation)
+  - Ollama provider (fully implemented)
+  - OpenAI provider (fully implemented)
+  - Anthropic Claude provider (fully implemented)
+  - Google Gemini provider (stub)
+  - AWS Bedrock provider (stub)
+  - Azure OpenAI provider (stub)
 
 ### Not Started
 - [ ] Audio capture module (system audio + microphone)

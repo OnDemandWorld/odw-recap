@@ -5,6 +5,7 @@ mod audio_input;
 mod config;
 mod error;
 mod storage;
+mod summarization;
 mod transcription;
 
 use std::path::PathBuf;
