@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recap by ODW.ai</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="app-container">
+      <!-- Header -->
+      <header class="app-header">
+        <h1>Recap</h1>
+        <span class="subtitle">Meeting Intelligence</span>
+      </header>
+
+      <!-- Navigation -->
+      <nav class="app-nav">
+        <button id="nav-library" class="nav-btn active">Meeting Library</button>
+        <button id="nav-import" class="nav-btn">Import</button>
+        <button id="nav-settings" class="nav-btn">Settings</button>
+      </nav>
+
+      <!-- Main Content -->
+      <main class="app-main">
+        <!-- Library View -->
+        <div id="library-view" class="view active">
+          <div class="view-header">
+            <h2>Meetings</h2>
+            <button id="refresh-btn" class="btn-secondary">Refresh</button>
+          </div>
+          <div id="meeting-list" class="meeting-list">
+            <p class="empty-state">Loading meetings...</p>
+          </div>
+        </div>
+
+        <!-- Import View -->
+        <div id="import-view" class="view">
+          <div class="view-header">
+            <h2>Import Audio</h2>
+          </div>
+          <div class="import-section">
+            <p>Import audio recordings from your device or smartphone.</p>
+            <button id="import-file-btn" class="btn-primary">Choose Audio File</button>
+            <div class="import-info">
+              <h3>Supported Formats</h3>
+              <p id="supported-formats">M4A, WAV, MP3, OGG, WebM, FLAC</p>
+            </div>
+            <div class="import-info">
+              <h3>Import Options</h3>
+              <ul>
+                <li><strong>File Browser:</strong> Click the button above to select an audio file</li>
+                <li><strong>Drag & Drop:</strong> Drag audio files into the application window</li>
+                <li><strong>Watch Folder:</strong> Configure a folder to automatically import new recordings</li>
+                <li><strong>HTTP Upload:</strong> Transfer from smartphone via local network</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings View -->
+        <div id="settings-view" class="view">
+          <div class="view-header">
+            <h2>Settings</h2>
+          </div>
+          <div class="settings-section">
+            <div class="settings-group">
+              <h3>Audio Input</h3>
+              <div class="setting-item">
+                <label>Watch Folder</label>
+                <input type="text" id="watch-folder-path" placeholder="/path/to/watch/folder" />
+                <button class="btn-secondary">Browse</button>
+              </div>
+              <div class="setting-item">
+                <label>HTTP Upload Server</label>
+                <input type="checkbox" id="http-server-enabled" />
+                <span>Enable</span>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h3>STT Provider</h3>
+              <div class="setting-item">
+                <label>Default Provider</label>
+                <select id="stt-provider">
+                  <option value="whisper_local">Whisper Local (whisper.cpp)</option>
+                  <option value="openai">OpenAI Whisper API</option>
+                  <option value="assemblyai">AssemblyAI</option>
+                  <option value="deepgram">Deepgram</option>
+                  <option value="aws_transcribe">AWS Transcribe</option>
+                  <option value="azure_speech">Azure Speech</option>
+                  <option value="google_stt">Google Speech-to-Text</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h3>LLM Provider</h3>
+              <div class="setting-item">
+                <label>Default Provider</label>
+                <select id="llm-provider">
+                  <option value="llama_local">Llama.cpp (Local)</option>
+                  <option value="ollama">Ollama (Local)</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic Claude</option>
+                  <option value="google">Google Gemini</option>
+                  <option value="aws_bedrock">AWS Bedrock</option>
+                  <option value="azure">Azure OpenAI</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h3>Prompt Templates</h3>
+              <div class="setting-item">
+                <button class="btn-secondary">Manage Templates</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- Status Bar -->
+      <footer class="status-bar">
+        <span id="status-bar">Ready</span>
+      </footer>
+    </div>
+  </body>
+</html>
