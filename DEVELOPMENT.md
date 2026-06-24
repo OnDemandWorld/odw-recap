@@ -52,10 +52,20 @@
   - Integration with Tauri commands (list_meetings, import_audio_file, get_supported_audio_formats)
 
 ### In Progress
-- [ ] Transcription module (whisper.cpp integration)
-- [ ] STT provider router and cloud providers
 - [ ] Summarization module and LLM providers
 - [ ] Prompt manager and template library
+
+### Completed
+- [x] Transcription module implemented:
+  - STTProvider trait definition
+  - STTRouter for provider selection
+  - WhisperLocalProvider (stub implementation)
+  - OpenAI Whisper API provider
+  - AssemblyAI provider
+  - Deepgram provider
+  - AWS Transcribe provider (stub)
+  - Azure Speech provider (stub)
+  - Google Speech-to-Text provider (stub)
 
 ### Not Started
 - [ ] Audio capture module (system audio + microphone)

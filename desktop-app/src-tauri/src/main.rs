@@ -5,6 +5,7 @@ mod audio_input;
 mod config;
 mod error;
 mod storage;
+mod transcription;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
