@@ -1,10 +1,10 @@
-# Recap by ODW.ai
+# ODW Recap
 
 A sovereign, on-device meeting intelligence system that captures, transcribes, and summarizes meetings without sending audio to third-party clouds.
 
 ## What is Recap?
 
-Recap turns meetings into structured action items, summaries, and decisions — all on your local machine. Its core promise: meeting recordings and transcripts never leave your device unless you explicitly choose a cloud provider.
+ODW Recap turns meetings into structured action items, summaries, and decisions — all on your local machine. Its core promise: meeting recordings and transcripts never leave your device unless you explicitly choose a cloud provider.
 
 No cloud bot silently joins your calls. No transcripts sit on a vendor's servers by default.
 
@@ -99,4 +99,5 @@ Full initial solution implemented. See [DEVELOPMENT.md](DEVELOPMENT.md) for deta
 
 ## License
 
-Proprietary — ODW.ai
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
