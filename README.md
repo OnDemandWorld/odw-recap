@@ -8,6 +8,10 @@ ODW Recap turns meetings into structured action items, summaries, and decisions 
 
 No cloud bot silently joins your calls. No transcripts sit on a vendor's servers by default.
 
+## Status
+
+⚠️ **Early release.** ODW [Name] is an early, functional release — core features work, but it is not yet hardened for production. We are refining every module toward a first full public release in **Q3 2026**. Until then, it is best used as a foundation to build on with AI coding agents (see below).
+
 ## Key Features
 
 - **On-device transcription**: Uses Whisper-family models locally via whisper.cpp
@@ -88,14 +92,8 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for the full build, test, and packaging ins
 - **Transcription**: whisper.cpp, OpenAI, Deepgram, AssemblyAI, AWS, Azure, Google
 - **Summarization**: llama.cpp, Ollama, OpenAI, Anthropic, Google, AWS, Azure
 
-## Status
-
-Full initial solution implemented. See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed status, known limitations, and future improvement roadmap.
-
-## Monetization
-
-- **Free core**: On-device transcription and notes
-- **Paid layer**: Cross-module sync, retention/governance controls, and team features
+## Working with AI agents
+This repository is built to be extended with AI coding agents. Rather than a turnkey product, ODW [Name] is a working, well-structured codebase you can clone and adapt to your own needs with an agent like Claude Code. The repo includes agent context files (e.g. `CLAUDE.md`) and clear architecture docs so an agent can quickly understand the structure and help you customise, integrate, and extend it. To get started: clone the repo, open it with your coding agent, point it at this README and the docs, and describe what you want to build.
 
 ## License
 
