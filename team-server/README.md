@@ -67,7 +67,15 @@ go test ./...
 
 ## Status
 
-Core API, auth, and database migrations are implemented. Remaining work includes audit logging middleware, organization management, and real-time sync processing.
+Core API, auth, database migrations, tenant-scoped meetings (ownership
+enforced on list/get/update/delete), best-effort audit logging, and the
+cross-product sync forwarder are implemented. Remaining work includes
+organization management and real-time sync processing.
+
+See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the Rust-side desktop-app
+blockers (real audio capture, local whisper.cpp/llama.cpp inference, speaker
+diarization, streaming transcription, pipeline-to-UI wiring, and code
+signing/notarization/auto-update) that require a Rust toolchain to address.
 
 ## API Endpoints
 

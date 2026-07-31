@@ -46,6 +46,14 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 		meetingID = uuid.New().String()
 	}
 
+	// Best-effort audit trail for the sync action. The meeting id is only a
+	// UUID when the desktop app supplied one; otherwise resource_id stays nil.
+	var auditResourceID *uuid.UUID
+	if parsed, err := uuid.Parse(meetingID); err == nil {
+		auditResourceID = &parsed
+	}
+	s.writeAudit(r, user, "meeting.sync", auditResourceID)
+
 	// Persist to sync_queue for auditability. Best-effort: a database failure
 	// here must not block the actual cross-product sync below.
 	if s.db != nil {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -10,32 +11,48 @@ import (
 	"github.com/ondemandworld/recap-team-server/internal/models"
 )
 
+// canAccess reports whether user may read/mutate meeting. The owning user
+// always can; admins may access any meeting (they can also see all meetings
+// via the /admin routes). Meetings with no recorded owner are only accessible
+// to admins.
+func (s *Server) canAccess(user *models.User, meeting *models.Meeting) bool {
+	if user == nil || meeting == nil {
+		return false
+	}
+	if user.Role == "admin" {
+		return true
+	}
+	return meeting.CreatedBy != nil && *meeting.CreatedBy == user.ID
+}
+
 func (s *Server) listMeetingsHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.DB().Query("SELECT id, title, meeting_type, language, status, created_at, updated_at FROM meetings ORDER BY created_at DESC LIMIT 100")
+	user := auth.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if s.meetings == nil {
+		respondError(w, http.StatusInternalServerError, "Meeting store not configured")
+		return
+	}
+
+	// Tenant isolation: a user only ever sees their own meetings here.
+	owned, err := s.meetings.ListByOwner(r.Context(), user.ID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to list meetings")
 		return
 	}
-	defer rows.Close()
 
-	var meetings []map[string]interface{}
-	for rows.Next() {
-		var id uuid.UUID
-		var title, meetingType, language, status string
-		var createdAt, updatedAt time.Time
-
-		if err := rows.Scan(&id, &title, &meetingType, &language, &status, &createdAt, &updatedAt); err != nil {
-			continue
-		}
-
+	meetings := make([]map[string]interface{}, 0, len(owned))
+	for _, m := range owned {
 		meetings = append(meetings, map[string]interface{}{
-			"id":           id,
-			"title":        title,
-			"meeting_type": meetingType,
-			"language":     language,
-			"status":       status,
-			"created_at":   createdAt,
-			"updated_at":   updatedAt,
+			"id":           m.ID,
+			"title":        m.Title,
+			"meeting_type": m.MeetingType,
+			"language":     m.Language,
+			"status":       m.Status,
+			"created_at":   m.CreatedAt,
+			"updated_at":   m.UpdatedAt,
 		})
 	}
 
@@ -43,52 +60,95 @@ func (s *Server) listMeetingsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createMeetingHandler(w http.ResponseWriter, r *http.Request) {
+	user := auth.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if s.meetings == nil {
+		respondError(w, http.StatusInternalServerError, "Meeting store not configured")
+		return
+	}
+
 	var req models.Meeting
 	if err := parseJSON(r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	user := auth.GetUserFromContext(r.Context())
-	meetingID := uuid.New()
-	status := "pending"
+	now := time.Now()
+	meeting := &models.Meeting{
+		ID:          uuid.New(),
+		CreatedBy:   &user.ID,
+		Title:       req.Title,
+		MeetingType: req.MeetingType,
+		Language:    req.Language,
+		Status:      "pending",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
 
-	_, err := s.db.DB().Exec(
-		"INSERT INTO meetings (id, created_by, title, meeting_type, language, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-		meetingID, user.ID, req.Title, req.MeetingType, req.Language, status, time.Now(), time.Now(),
-	)
-	if err != nil {
+	if err := s.meetings.Create(r.Context(), meeting); err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create meeting")
 		return
 	}
 
-	respondJSON(w, http.StatusCreated, map[string]interface{}{"id": meetingID, "status": status})
+	s.writeAudit(r, user, "meeting.create", &meeting.ID)
+
+	respondJSON(w, http.StatusCreated, map[string]interface{}{"id": meeting.ID, "status": meeting.Status})
 }
 
 func (s *Server) getMeetingHandler(w http.ResponseWriter, r *http.Request) {
-	meetingID := chi.URLParam(r, "meetingID")
+	user := auth.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if s.meetings == nil {
+		respondError(w, http.StatusInternalServerError, "Meeting store not configured")
+		return
+	}
 
-	var meeting models.Meeting
-	var createdBy uuid.UUID
-	var createdAt, updatedAt time.Time
-
-	err := s.db.DB().QueryRow(
-		"SELECT id, created_by, title, meeting_type, language, status, created_at, updated_at FROM meetings WHERE id = $1",
-		meetingID,
-	).Scan(&meeting.ID, &createdBy, &meeting.Title, &meeting.MeetingType, &meeting.Language, &meeting.Status, &createdAt, &updatedAt)
-
+	meetingID, err := uuid.Parse(chi.URLParam(r, "meetingID"))
 	if err != nil {
 		respondError(w, http.StatusNotFound, "Meeting not found")
 		return
 	}
 
-	meeting.CreatedBy = &createdBy
+	meeting, err := s.meetings.Get(r.Context(), meetingID)
+	if errors.Is(err, ErrMeetingNotFound) {
+		respondError(w, http.StatusNotFound, "Meeting not found")
+		return
+	}
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to get meeting")
+		return
+	}
+
+	if !s.canAccess(user, meeting) {
+		respondError(w, http.StatusForbidden, "You do not have access to this meeting")
+		return
+	}
 
 	respondJSON(w, http.StatusOK, meeting)
 }
 
 func (s *Server) updateMeetingHandler(w http.ResponseWriter, r *http.Request) {
-	meetingID := chi.URLParam(r, "meetingID")
+	user := auth.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if s.meetings == nil {
+		respondError(w, http.StatusInternalServerError, "Meeting store not configured")
+		return
+	}
+
+	meetingID, err := uuid.Parse(chi.URLParam(r, "meetingID"))
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Meeting not found")
+		return
+	}
 
 	var req models.Meeting
 	if err := parseJSON(r, &req); err != nil {
@@ -96,26 +156,74 @@ func (s *Server) updateMeetingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := s.db.DB().Exec(
-		"UPDATE meetings SET title = $1, meeting_type = $2, language = $3, updated_at = $4 WHERE id = $5",
-		req.Title, req.MeetingType, req.Language, time.Now(), meetingID,
-	)
+	meeting, err := s.meetings.Get(r.Context(), meetingID)
+	if errors.Is(err, ErrMeetingNotFound) {
+		respondError(w, http.StatusNotFound, "Meeting not found")
+		return
+	}
 	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to get meeting")
+		return
+	}
+
+	if !s.canAccess(user, meeting) {
+		respondError(w, http.StatusForbidden, "You do not have access to this meeting")
+		return
+	}
+
+	meeting.Title = req.Title
+	meeting.MeetingType = req.MeetingType
+	meeting.Language = req.Language
+	meeting.UpdatedAt = time.Now()
+
+	if err := s.meetings.Update(r.Context(), meeting); err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to update meeting")
 		return
 	}
+
+	s.writeAudit(r, user, "meeting.update", &meeting.ID)
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 func (s *Server) deleteMeetingHandler(w http.ResponseWriter, r *http.Request) {
-	meetingID := chi.URLParam(r, "meetingID")
+	user := auth.GetUserFromContext(r.Context())
+	if user == nil {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if s.meetings == nil {
+		respondError(w, http.StatusInternalServerError, "Meeting store not configured")
+		return
+	}
 
-	_, err := s.db.DB().Exec("DELETE FROM meetings WHERE id = $1", meetingID)
+	meetingID, err := uuid.Parse(chi.URLParam(r, "meetingID"))
 	if err != nil {
+		respondError(w, http.StatusNotFound, "Meeting not found")
+		return
+	}
+
+	meeting, err := s.meetings.Get(r.Context(), meetingID)
+	if errors.Is(err, ErrMeetingNotFound) {
+		respondError(w, http.StatusNotFound, "Meeting not found")
+		return
+	}
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to get meeting")
+		return
+	}
+
+	if !s.canAccess(user, meeting) {
+		respondError(w, http.StatusForbidden, "You do not have access to this meeting")
+		return
+	}
+
+	if err := s.meetings.Delete(r.Context(), meetingID); err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to delete meeting")
 		return
 	}
+
+	s.writeAudit(r, user, "meeting.delete", &meeting.ID)
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

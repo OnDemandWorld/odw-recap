@@ -19,14 +19,21 @@ type Server struct {
 	redis         *db.Redis
 	jwtManager    *auth.JWTManager
 	syncForwarder *odwsync.Forwarder
+	meetings      MeetingStore
+	audit         AuditLogger
 }
 
-// NewServer creates a new API server
+// NewServer creates a new API server. When a non-nil database is supplied the
+// PostgreSQL-backed meeting store and audit logger are wired automatically.
 func NewServer(database *db.Database, redis *db.Redis, jwtSecret string) *Server {
 	s := &Server{
 		db:         database,
 		redis:      redis,
 		jwtManager: auth.NewJWTManager(jwtSecret),
+	}
+	if database != nil {
+		s.meetings = &dbMeetingStore{database: database}
+		s.audit = &dbAuditLogger{database: database}
 	}
 	return s
 }
@@ -35,6 +42,18 @@ func NewServer(database *db.Database, redis *db.Redis, jwtSecret string) *Server
 // to push meeting knowledge into Vault and trigger Loop workflows.
 func (s *Server) SetSyncForwarder(f *odwsync.Forwarder) {
 	s.syncForwarder = f
+}
+
+// SetMeetingStore overrides the meeting store (used by tests to inject an
+// in-memory fake).
+func (s *Server) SetMeetingStore(m MeetingStore) {
+	s.meetings = m
+}
+
+// SetAuditLogger overrides the audit logger (used by tests to inject an
+// in-memory recorder).
+func (s *Server) SetAuditLogger(a AuditLogger) {
+	s.audit = a
 }
 
 // Router sets up and returns the HTTP router

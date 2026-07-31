@@ -113,7 +113,22 @@ fn main() {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("RecapData");
 
-    let storage = StorageManager::new(data_dir.clone(), "default-passphrase")
+    // SECURITY: the storage encryption passphrase is sourced from the
+    // environment with intentionally NO hardcoded default. When
+    // RECAP_ENCRYPTION_PASSPHRASE is unset we fall back to an empty passphrase
+    // and emit a loud warning — a documented development-only convenience, not
+    // a production default. Production deployments MUST set the variable.
+    let encryption_passphrase =
+        std::env::var("RECAP_ENCRYPTION_PASSPHRASE").unwrap_or_else(|_| {
+            eprintln!(
+                "WARNING: RECAP_ENCRYPTION_PASSPHRASE is not set; falling back to an \
+                 empty passphrase. Set it in production — local data will not be \
+                 protected by a meaningful encryption key."
+            );
+            String::new()
+        });
+
+    let storage = StorageManager::new(data_dir.clone(), &encryption_passphrase)
         .expect("Failed to initialize storage");
 
     let db_path = data_dir.join("recap.db");
