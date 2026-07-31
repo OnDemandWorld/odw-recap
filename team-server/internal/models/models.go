@@ -53,6 +53,8 @@ type Meeting struct {
 	STTProvider     *string    `json:"stt_provider"`
 	LLMProvider     *string    `json:"llm_provider"`
 	Status          string     `json:"status"`
+	VaultEntryID    *string    `json:"vault_entry_id"`
+	LoopTaskID      *string    `json:"loop_task_id"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 }

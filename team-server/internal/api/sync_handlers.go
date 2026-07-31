@@ -2,11 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/ondemandworld/recap-team-server/internal/auth"
+	odwsync "github.com/ondemandworld/recap-team-server/internal/sync"
 )
 
 // SyncRequest represents a sync request from the desktop app
@@ -43,25 +46,52 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 		meetingID = uuid.New().String()
 	}
 
-	// Queue sync item for processing
-	payload, err := json.Marshal(req)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to marshal sync payload")
+	// Persist to sync_queue for auditability. Best-effort: a database failure
+	// here must not block the actual cross-product sync below.
+	if s.db != nil {
+		if payload, err := json.Marshal(req); err == nil {
+			if _, err := s.db.DB().Exec(
+				"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES ($1, $2, $3, $4, $5)",
+				meetingID, req.Action, string(payload), "pending", time.Now(),
+			); err != nil {
+				log.Printf("sync: failed to persist sync_queue entry for meeting %s: %v", meetingID, err)
+			}
+		}
+	}
+
+	// No forwarder configured — fall back to legacy queue-only behaviour.
+	if s.syncForwarder == nil {
+		respondJSON(w, http.StatusOK, SyncResponse{
+			Status:    "queued",
+			MeetingID: meetingID,
+			Message:   "Meeting data queued for sync",
+		})
 		return
 	}
 
-	_, err = s.db.DB().Exec(
-		"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES ($1, $2, $3, $4, $5)",
-		meetingID, req.Action, string(payload), "pending", time.Now(),
-	)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to queue sync")
+	syncReq := odwsync.SyncRequest{
+		MeetingID:      meetingID,
+		Action:         req.Action,
+		MeetingData:    req.MeetingData,
+		TranscriptData: req.TranscriptData,
+		SummaryData:    req.SummaryData,
+	}
+
+	if err := s.syncForwarder.ProcessSync(r.Context(), syncReq); err != nil {
+		// One or more targets failed, but we do not 500 the whole request —
+		// record the error and report a partial sync.
+		log.Printf("sync: partial sync for meeting %s: %v", meetingID, err)
+		respondJSON(w, http.StatusOK, SyncResponse{
+			Status:    "partial",
+			MeetingID: meetingID,
+			Message:   fmt.Sprintf("Sync completed with errors: %v", err),
+		})
 		return
 	}
 
 	respondJSON(w, http.StatusOK, SyncResponse{
-		Status:    "queued",
+		Status:    "synced",
 		MeetingID: meetingID,
-		Message:   "Meeting data queued for sync",
+		Message:   "Meeting data synced to Vault and Loop",
 	})
 }

@@ -10,13 +10,15 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/ondemandworld/recap-team-server/internal/auth"
 	"github.com/ondemandworld/recap-team-server/internal/db"
+	odwsync "github.com/ondemandworld/recap-team-server/internal/sync"
 )
 
 // Server represents the API server
 type Server struct {
-	db         *db.Database
-	redis      *db.Redis
-	jwtManager *auth.JWTManager
+	db            *db.Database
+	redis         *db.Redis
+	jwtManager    *auth.JWTManager
+	syncForwarder *odwsync.Forwarder
 }
 
 // NewServer creates a new API server
@@ -27,6 +29,12 @@ func NewServer(database *db.Database, redis *db.Redis, jwtSecret string) *Server
 		jwtManager: auth.NewJWTManager(jwtSecret),
 	}
 	return s
+}
+
+// SetSyncForwarder attaches the cross-product sync forwarder used by POST /sync
+// to push meeting knowledge into Vault and trigger Loop workflows.
+func (s *Server) SetSyncForwarder(f *odwsync.Forwarder) {
+	s.syncForwarder = f
 }
 
 // Router sets up and returns the HTTP router

@@ -167,6 +167,10 @@ func runMigrations(db *sql.DB) error {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		)`,
 
+		// Cross-product sync bookkeeping (idempotent column additions)
+		`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS vault_entry_id TEXT`,
+		`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS loop_task_id TEXT`,
+
 		// Create indexes
 		`CREATE INDEX IF NOT EXISTS idx_meetings_organization ON meetings(organization_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_meetings_created_by ON meetings(created_by)`,

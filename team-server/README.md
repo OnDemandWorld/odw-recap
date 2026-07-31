@@ -7,7 +7,11 @@ Go-based backend for Recap by ODW.ai team features.
 - **Authentication**: JWT-based authentication with registration and login
 - **Authorization**: RBAC with admin/member roles
 - **Meetings API**: CRUD operations for meetings
-- **Sync API**: Queue meeting data from desktop app for synchronization
+- **Sync API**: Pushes meeting knowledge cross-product — uploads a Markdown
+  summary to Vault (`POST {VAULT_API_URL}/files/upload`) and triggers a Loop
+  workflow webhook for action items (`POST {LOOP_API_URL}/webhooks/{trigger_id}`,
+  HMAC-SHA256 signed when a secret is configured). Also records the request in
+  `sync_queue` for auditability.
 - **Admin Dashboard**: User management, audit logs, stats
 - **Database**: PostgreSQL with automatic migrations
 - **Cache/Sessions**: Redis support
@@ -33,6 +37,12 @@ PORT=8080
 DATABASE_URL=postgres://user:password@localhost:5432/recap?sslmode=disable
 REDIS_URL=localhost:6379
 JWT_SECRET=your-secret-key
+
+# Cross-product sync (Recap -> Vault / Loop)
+VAULT_API_URL=http://localhost:8765
+LOOP_API_URL=http://localhost:3000
+LOOP_WEBHOOK_TRIGGER_ID=            # optional; when empty, Loop triggering is skipped
+LOOP_WEBHOOK_SECRET=                # optional; HMAC-SHA256 shared secret for the Loop webhook
 ```
 
 ## Running Locally

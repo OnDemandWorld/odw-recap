@@ -11,6 +11,7 @@ import (
 
 	"github.com/ondemandworld/recap-team-server/internal/api"
 	"github.com/ondemandworld/recap-team-server/internal/db"
+	odwsync "github.com/ondemandworld/recap-team-server/internal/sync"
 )
 
 func main() {
@@ -36,6 +37,21 @@ func main() {
 		log.Println("WARNING: Using default JWT secret. Set JWT_SECRET environment variable!")
 	}
 
+	// Cross-product sync configuration (Recap -> Vault / Loop)
+	vaultAPIURL := os.Getenv("VAULT_API_URL")
+	if vaultAPIURL == "" {
+		vaultAPIURL = "http://localhost:8765"
+	}
+
+	loopAPIURL := os.Getenv("LOOP_API_URL")
+	if loopAPIURL == "" {
+		loopAPIURL = "http://localhost:3000"
+	}
+
+	// Optional: when LOOP_WEBHOOK_TRIGGER_ID is unset, Loop triggering is skipped.
+	loopTriggerID := os.Getenv("LOOP_WEBHOOK_TRIGGER_ID")
+	loopWebhookSecret := os.Getenv("LOOP_WEBHOOK_SECRET")
+
 	// Initialize database
 	database, err := db.NewDatabase(dsn)
 	if err != nil {
@@ -49,6 +65,15 @@ func main() {
 
 	// Initialize API server
 	server := api.NewServer(database, redis, jwtSecret)
+
+	// Wire the cross-product sync forwarder (Recap -> Vault / Loop)
+	syncForwarder := odwsync.NewForwarder(&http.Client{Timeout: 30 * time.Second}, odwsync.Config{
+		VaultAPIURL:        vaultAPIURL,
+		LoopAPIURL:         loopAPIURL,
+		LoopWebhookTrigger: loopTriggerID,
+		LoopWebhookSecret:  loopWebhookSecret,
+	})
+	server.SetSyncForwarder(syncForwarder)
 
 	// Create HTTP server
 	httpServer := &http.Server{
