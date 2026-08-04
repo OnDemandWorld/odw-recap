@@ -16,18 +16,20 @@ let meetingDetailEl;
 // Initialize app
 async function init() {
   meetingListEl = document.querySelector("#meeting-list");
-  importSectionEl = document.querySelector("#import-section");
-  settingsSectionEl = document.querySelector("#settings-section");
+  importSectionEl = document.querySelector(".import-section");
+  settingsSectionEl = document.querySelector(".settings-section");
   statusEl = document.querySelector("#status-bar");
   meetingDetailEl = document.querySelector("#meeting-detail");
 
   // Setup event listeners
+  // Note: #back-to-library-btn is rendered dynamically in viewMeetingDetails(),
+  // so its listener is attached there — binding it here would throw on a null
+  // query and abort init().
   document.querySelector("#nav-library").addEventListener("click", () => showView("library"));
   document.querySelector("#nav-import").addEventListener("click", () => showView("import"));
   document.querySelector("#nav-settings").addEventListener("click", () => showView("settings"));
   document.querySelector("#import-file-btn").addEventListener("click", importAudioFile);
   document.querySelector("#refresh-btn").addEventListener("click", loadMeetings);
-  document.querySelector("#back-to-library-btn").addEventListener("click", () => showView("library"));
   document.querySelector("#save-api-keys-btn").addEventListener("click", saveApiKeys);
   document.querySelector("#create-template-btn").addEventListener("click", createPromptTemplate);
 
