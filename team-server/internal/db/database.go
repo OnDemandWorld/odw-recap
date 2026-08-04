@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "github.com/lib/pq"
 )
@@ -10,6 +11,29 @@ import (
 // Database wraps PostgreSQL connection
 type Database struct {
 	db *sql.DB
+}
+
+// dsnHasSSLMode reports whether the DSN already pins an sslmode parameter
+// (URL form "...?sslmode=..." or keyword form "sslmode=...").
+func dsnHasSSLMode(dsn string) bool {
+	return strings.Contains(strings.ToLower(dsn), "sslmode=")
+}
+
+// annotateSSLError adds an actionable hint when the connection failure looks
+// like server-side SSL being unavailable while the driver defaults to
+// requiring it. The secure default is kept; only the diagnostic improves.
+func annotateSSLError(err error, dsn string) error {
+	if err == nil || dsnHasSSLMode(dsn) {
+		return err
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "ssl is not enabled") ||
+		strings.Contains(msg, "unsupported frontend protocol") {
+		return fmt.Errorf(
+			"%w (the driver requires SSL by default; if your PostgreSQL has no SSL, append ?sslmode=disable to DATABASE_URL)",
+			err)
+	}
+	return err
 }
 
 // NewDatabase creates a new database connection
@@ -21,7 +45,7 @@ func NewDatabase(dsn string) (*Database, error) {
 
 	// Test connection
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+		return nil, fmt.Errorf("failed to ping database: %w", annotateSSLError(err, dsn))
 	}
 
 	// Run migrations
