@@ -1,4 +1,7 @@
-use crate::error::{RecapError, Result};
+//! Scaffolded subsystem — wired up in a future milestone; see IMPROVEMENT_PLAN.md.
+#![allow(dead_code)]
+
+use crate::error::Result;
 use crate::storage::encryption_manager::EncryptionManager;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -2,7 +2,7 @@ use crate::error::{RecapError, Result};
 use crate::storage::types::TranscriptSegment;
 use crate::transcription::stt_provider::{STTProvider, TranscriptionConfig, TranscriptionResult};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -10,13 +10,6 @@ use uuid::Uuid;
 pub struct OpenAIWhisperProvider {
     api_key: Option<String>,
     client: reqwest::Client,
-}
-
-#[derive(Debug, Serialize)]
-struct WhisperRequest {
-    model: String,
-    language: Option<String>,
-    response_format: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +33,8 @@ impl OpenAIWhisperProvider {
         }
     }
 
+    /// Builder reserved for dynamic credential injection (see IMPROVEMENT_PLAN.md).
+    #[allow(dead_code)]
     pub fn with_api_key(mut self, api_key: String) -> Self {
         self.api_key = Some(api_key);
         self

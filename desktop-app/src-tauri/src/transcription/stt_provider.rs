@@ -7,6 +7,8 @@ use std::path::Path;
 /// Configuration for transcription
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionConfig {
+    /// Which registered provider to use; falls back to the router default.
+    pub provider: Option<String>,
     pub language: Option<String>,
     pub model: Option<String>,
     pub detect_speakers: bool,
@@ -17,6 +19,7 @@ pub struct TranscriptionConfig {
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
+            provider: None,
             language: Some("en".to_string()),
             model: None,
             detect_speakers: false,

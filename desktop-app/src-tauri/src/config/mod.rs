@@ -1,4 +1,4 @@
-use crate::error::{RecapError, Result};
+use crate::error::Result;
 use crate::storage::sqlite_manager::SqliteManager;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -64,14 +64,28 @@ impl ConfigManager {
         self.db.set_config_value(key, &value_str)
     }
 
+    /// Read a plain string config value.
+    ///
+    /// Values written by `set` are JSON-encoded, so a JSON-encoded string is
+    /// decoded transparently; raw values (e.g. written by older versions) are
+    /// returned as-is.
     pub fn get_string(&self, key: &str) -> Result<Option<String>> {
-        self.db.get_config_value(key)
+        match self.db.get_config_value(key)? {
+            Some(raw) => match serde_json::from_str::<String>(&raw) {
+                Ok(decoded) => Ok(Some(decoded)),
+                Err(_) => Ok(Some(raw)),
+            },
+            None => Ok(None),
+        }
     }
 
+    /// Write a plain string config value (stored JSON-encoded so that
+    /// `get::<String>` and `get_string` round-trip consistently).
     pub fn set_string(&self, key: &str, value: &str) -> Result<()> {
-        self.db.set_config_value(key, value)
+        self.set(key, &value.to_string())
     }
 
+    #[allow(dead_code)]
     pub fn get_or_default<T: serde::de::DeserializeOwned + Default>(&self, key: &str) -> Result<T> {
         match self.get::<T>(key)? {
             Some(v) => Ok(v),
@@ -79,6 +93,7 @@ impl ConfigManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn data_directory(&self) -> Result<PathBuf> {
         match self.get::<PathBuf>("data_directory")? {
             Some(dir) => Ok(dir),
@@ -86,6 +101,7 @@ impl ConfigManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn watch_folder_path(&self) -> Result<PathBuf> {
         match self.get::<PathBuf>("watch_folder_path")? {
             Some(path) => Ok(path),
@@ -93,6 +109,7 @@ impl ConfigManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn http_upload_server_port(&self) -> Result<u16> {
         match self.get::<u16>("http_upload_server_port")? {
             Some(port) => Ok(port),
@@ -112,5 +129,40 @@ impl ConfigManager {
             Some(provider) => Ok(provider),
             None => Ok(self.defaults.llm_provider.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::sqlite_manager::SqliteManager;
+
+    #[test]
+    fn test_string_and_typed_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = SqliteManager::new(&dir.path().join("cfg.db")).unwrap();
+        let config = ConfigManager::new(db);
+
+        // set_string values must be readable from both accessors.
+        config.set_string("stt_provider", "deepgram").unwrap();
+        assert_eq!(
+            config.get_string("stt_provider").unwrap(),
+            Some("deepgram".to_string())
+        );
+        assert_eq!(
+            config.get::<String>("stt_provider").unwrap(),
+            Some("deepgram".to_string())
+        );
+
+        // Typed values must be readable as plain strings too.
+        config.set("llm_provider", &"ollama".to_string()).unwrap();
+        assert_eq!(
+            config.get_string("llm_provider").unwrap(),
+            Some("ollama".to_string())
+        );
+
+        // Defaults apply when nothing is stored.
+        assert!(config.get_string("nonexistent").unwrap().is_none());
+        assert_eq!(config.stt_provider().unwrap(), "deepgram");
     }
 }

@@ -1,7 +1,8 @@
-use crate::error::{RecapError, Result};
+use crate::error::Result;
 use std::collections::HashMap;
 
 /// Substitute variables in a template string
+#[allow(dead_code)]
 pub fn substitute_variables(template: &str, variables: &HashMap<String, String>) -> Result<String> {
     let mut result = String::new();
     let mut chars = template.chars().peekable();

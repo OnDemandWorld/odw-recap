@@ -1,3 +1,6 @@
+//! Scaffolded subsystem — wired up in a future milestone; see IMPROVEMENT_PLAN.md.
+#![allow(dead_code)]
+
 use crate::error::{RecapError, Result};
 use crate::summarization::llm_provider::{LLMProvider, SummarizationConfig, SummarizationResult};
 use async_trait::async_trait;
@@ -35,7 +38,7 @@ impl LLMProvider for GoogleProvider {
     async fn summarize(
         &self,
         text: &str,
-        config: SummarizationConfig,
+        _config: SummarizationConfig,
     ) -> Result<SummarizationResult> {
         let _api_key = self.api_key.as_ref().ok_or_else(|| {
             RecapError::Provider {

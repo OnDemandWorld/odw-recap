@@ -1,3 +1,6 @@
+//! Scaffolded subsystem — wired up in a future milestone; see IMPROVEMENT_PLAN.md.
+#![allow(dead_code)]
+
 use crate::error::{RecapError, Result};
 use crate::storage::types::TranscriptSegment;
 use crate::transcription::stt_provider::{STTProvider, TranscriptionConfig, TranscriptionResult};
@@ -37,7 +40,7 @@ impl STTProvider for GoogleSTTProvider {
 
     async fn transcribe(
         &self,
-        audio_path: &Path,
+        _audio_path: &Path,
         config: TranscriptionConfig,
     ) -> Result<TranscriptionResult> {
         let _api_key = self.api_key.as_ref().ok_or_else(|| {

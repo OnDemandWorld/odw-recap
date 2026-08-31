@@ -1,22 +1,24 @@
 #!/bin/bash
+# Build every component of the Recap solution.
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+CARGO_BIN="cargo"
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+    CARGO_BIN="$HOME/.cargo/bin/cargo"
+fi
 
 echo "Building Recap solution..."
 
-# Build Rust desktop app backend
 echo "Building Rust backend..."
-cd desktop-app/src-tauri
-~/.cargo/bin/cargo build --release
-cd ../..
+(cd "$REPO_ROOT/desktop-app/src-tauri" && "$CARGO_BIN" build --release)
 
-# Build Tauri frontend
-echo "Building Tauri frontend..."
-npm install
-npm run tauri build
+echo "Building Tauri desktop app..."
+(cd "$REPO_ROOT/desktop-app" && npm install && npm run tauri build)
 
-# Build Go team server
 echo "Building team server..."
-cd ../team-server
-go build -o recap-team-server ./cmd/server
+(cd "$REPO_ROOT/team-server" && go build -o recap-team-server ./cmd/server)
 
 echo "Build complete!"

@@ -2,7 +2,7 @@ use crate::error::{RecapError, Result};
 use crate::storage::types::TranscriptSegment;
 use crate::transcription::stt_provider::{STTProvider, TranscriptionConfig, TranscriptionResult};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -49,6 +49,8 @@ impl DeepgramProvider {
         }
     }
 
+    /// Builder reserved for dynamic credential injection (see IMPROVEMENT_PLAN.md).
+    #[allow(dead_code)]
     pub fn with_api_key(mut self, api_key: String) -> Self {
         self.api_key = Some(api_key);
         self
@@ -87,12 +89,28 @@ impl STTProvider for DeepgramProvider {
         // Read audio file
         let audio_data = tokio::fs::read(audio_path).await?;
 
-        // Make API request
+        // Make API request. The Content-Type must match the actual file
+        // format, otherwise Deepgram rejects or mis-decodes the audio.
+        let content_type = match audio_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref()
+        {
+            Some("mp3") => "audio/mpeg",
+            Some("wav") => "audio/wav",
+            Some("m4a") => "audio/mp4",
+            Some("ogg") => "audio/ogg",
+            Some("flac") => "audio/flac",
+            Some("webm") => "audio/webm",
+            _ => "application/octet-stream",
+        };
+
         let response = self
             .client
             .post("https://api.deepgram.com/v1/listen?punctuate=true")
             .header("Authorization", format!("Token {}", api_key))
-            .header("Content-Type", "audio/mpeg")
+            .header("Content-Type", content_type)
             .body(audio_data)
             .send()
             .await
@@ -123,7 +141,8 @@ impl STTProvider for DeepgramProvider {
                 if let Some(words) = &alternative.words {
                     // Group words into segments (simple approach: every 10 words)
                     let mut segments = Vec::new();
-                    let mut current_words = Vec::new();
+                    let mut current_words: Vec<String> = Vec::new();
+                    let mut confidences: Vec<f64> = Vec::new();
                     let mut start_time = 0.0;
 
                     for (i, word) in words.iter().enumerate() {
@@ -131,13 +150,13 @@ impl STTProvider for DeepgramProvider {
                             start_time = word.start;
                         }
                         current_words.push(word.word.clone());
+                        confidences.push(word.confidence);
 
                         if current_words.len() >= 10 || i == words.len() - 1 {
                             let end_time = word.end;
                             let text = current_words.join(" ");
-                            let avg_confidence =
-                                current_words.iter().map(|_| word.confidence).sum::<f64>()
-                                    / current_words.len() as f64;
+                            let avg_confidence = confidences.iter().sum::<f64>()
+                                / confidences.len() as f64;
 
                             let id = segment_id;
                             segment_id += 1;
@@ -154,6 +173,7 @@ impl STTProvider for DeepgramProvider {
                             });
 
                             current_words.clear();
+                            confidences.clear();
                         }
                     }
 

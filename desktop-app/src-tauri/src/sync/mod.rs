@@ -1,3 +1,6 @@
+//! Scaffolded subsystem — wired up in a future milestone; see IMPROVEMENT_PLAN.md.
+#![allow(dead_code)]
+
 pub mod client;
 pub mod types;
 

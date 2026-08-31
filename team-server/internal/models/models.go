@@ -59,16 +59,16 @@ type Meeting struct {
 
 // TranscriptSegment represents a segment of transcript
 type TranscriptSegment struct {
-	ID         int64      `json:"id"`
-	MeetingID  uuid.UUID  `json:"meeting_id"`
-	SpeakerID  *string    `json:"speaker_id"`
-	StartMs    int64      `json:"start_ms"`
-	EndMs      int64      `json:"end_ms"`
-	Text       string     `json:"text"`
-	Confidence *float32   `json:"confidence"`
-	IsFinal    bool       `json:"is_final"`
-	Version    int        `json:"version"`
-	CreatedAt  time.Time  `json:"created_at"`
+	ID         int64     `json:"id"`
+	MeetingID  uuid.UUID `json:"meeting_id"`
+	SpeakerID  *string   `json:"speaker_id"`
+	StartMs    int64     `json:"start_ms"`
+	EndMs      int64     `json:"end_ms"`
+	Text       string    `json:"text"`
+	Confidence *float32  `json:"confidence"`
+	IsFinal    bool      `json:"is_final"`
+	Version    int       `json:"version"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // Summary represents a meeting summary

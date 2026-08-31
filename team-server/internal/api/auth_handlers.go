@@ -3,14 +3,23 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/lib/pq"
 	"github.com/ondemandworld/recap-team-server/internal/auth"
 	"github.com/ondemandworld/recap-team-server/internal/models"
+	"golang.org/x/crypto/bcrypt"
 )
+
+// bcrypt only uses the first 72 bytes of a password; reject longer input
+// rather than silently truncating it.
+const maxPasswordBytes = 72
+const minPasswordLength = 8
 
 // RegisterRequest represents a registration request
 type RegisterRequest struct {
@@ -27,8 +36,8 @@ type LoginRequest struct {
 
 // AuthResponse represents an authentication response
 type AuthResponse struct {
-	Token string       `json:"token"`
-	User  models.User  `json:"user"`
+	Token string      `json:"token"`
+	User  models.User `json:"user"`
 }
 
 func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +49,26 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Email == "" || req.Password == "" || req.Name == "" {
 		respondError(w, http.StatusBadRequest, "Email, password, and name are required")
+		return
+	}
+
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.Name = strings.TrimSpace(req.Name)
+
+	if _, err := mail.ParseAddress(req.Email); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid email address")
+		return
+	}
+	if req.Name == "" {
+		respondError(w, http.StatusBadRequest, "Name must not be empty")
+		return
+	}
+	if len(req.Password) < minPasswordLength {
+		respondError(w, http.StatusBadRequest, "Password must be at least 8 characters")
+		return
+	}
+	if len(req.Password) > maxPasswordBytes {
+		respondError(w, http.StatusBadRequest, "Password is too long")
 		return
 	}
 
@@ -67,6 +96,11 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		user.ID, user.Email, user.PasswordHash, user.Name, user.Role, user.CreatedAt, user.UpdatedAt,
 	)
 	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" { // unique_violation
+			respondError(w, http.StatusConflict, "A user with this email already exists")
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "Failed to create user")
 		return
 	}
@@ -137,5 +171,6 @@ func (s *Server) meHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseJSON(r *http.Request, v interface{}) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBodyBytes)
 	return json.NewDecoder(r.Body).Decode(v)
 }

@@ -3,8 +3,11 @@
 ## Project: Recap by ODW.ai
 
 **Repository:** https://github.com/OnDemandWorld/odw-recap  
-**Status:** Full solution implemented  
-**Last Updated:** 2026-06-24
+**Status:** Full review & refactor completed — end-to-end local pipeline wired (import → transcribe → summarize)  
+**Last Updated:** 2026-09-01
+
+> **See `IMPROVEMENT_PLAN.md` for the full list of fixes made in the 2026-09
+> review and the prioritized roadmap (P0–P3) of what to build next.**
 
 ---
 
@@ -83,13 +86,30 @@
 - [x] iOS Shortcuts integration types
 
 #### Testing, CI/CD, Packaging
-- [x] Rust unit tests (7 passing)
-- [x] Go unit tests (3 passing)
+- [x] Rust unit tests (16 passing)
+- [x] Go unit tests (9 passing)
 - [x] Integration test scaffolding for Tauri commands
 - [x] E2E test scaffolding for desktop UI
-- [x] GitHub Actions CI workflow (Rust + Go tests, desktop build, team server build)
+- [x] GitHub Actions CI workflow (Rust + Go tests, desktop build, team server build; includes Tauri Linux system dependencies)
 - [x] Build scripts for macOS/Windows/Linux
 - [x] Packaging script for distribution artifacts
+
+#### 2026-09 Review & Refactor (see IMPROVEMENT_PLAN.md for details)
+- [x] Provider routers wired end-to-end (`STTRouter`/`LLMRouter::with_all_providers`)
+- [x] Tauri commands for the full local loop: `transcribe_meeting`, `summarize_meeting`,
+      `get_transcript_segments`, `get_summary`, `search_transcripts`,
+      `list_stt_providers`, `list_llm_providers`, prompt template CRUD,
+      `set_config`/`save_api_key`/`has_api_key`
+- [x] Frontend rewritten on `window.__TAURI__` (no bundler needed); real settings,
+      API key storage, meeting details with Transcribe/Summarize actions
+- [x] Encryption: per-install persisted random salt + per-install passphrase
+      (env override `RECAP_PASSPHRASE`); dangerous `change_passphrase` disabled
+      until re-encryption is implemented
+- [x] FTS5 transcript search working (sync triggers + rebuild)
+- [x] Team server: meeting ownership scoping, sync FK fix, CORS fix, request
+      size limits, registration validation, 409 on duplicate email
+- [x] Import now creates a meeting record; data dir moved to platform-local dir
+- [x] Compiler warnings in project code: 150 → 0; unused dependencies removed
 
 ---
 
@@ -97,8 +117,9 @@
 
 | Component | Tests | Status |
 |-----------|-------|--------|
-| Rust desktop backend | 7 | ✅ Passing |
-| Go team server | 3 | ✅ Passing |
+| Rust desktop backend | 16 | ✅ Passing |
+| Go team server | 9 | ✅ Passing |
+| Frontend (jest) | scaffolds excluded (`--passWithNoTests`) | ✅ Exits clean |
 | Desktop build | — | ✅ Compiles |
 | Team server build | — | ✅ Compiles |
 
@@ -170,11 +191,13 @@ go test ./...
 
 ## Known Blockers & Limitations
 
-1. **Tauri 2.x upgrade deferred** due to scaffolding tooling availability.
-2. **Stub providers** (AssemblyAI, AWS Transcribe, Azure Speech, Google STT, Google Gemini, AWS Bedrock, Azure OpenAI, Llama.cpp, Whisper.cpp) require real API/FFI integration before production use.
-3. **Audio capture** is implemented as a stub structure; real I/O requires `cpal` and platform-specific loopback devices.
-4. **Mobile companion app** and **iOS Shortcuts** are represented only as data types and sync contracts; no native mobile code exists yet.
-5. **E2E tests** are scaffolding only and require Playwright + built Tauri app to run.
+1. **Tauri 2.x upgrade deferred** due to scaffolding tooling availability; CSP is `null` until the migration.
+2. **Stub providers** (AssemblyAI, AWS Transcribe, Azure Speech, Google STT, Google Gemini, AWS Bedrock, Azure OpenAI, Llama.cpp, Whisper.cpp) require real API/FFI integration before production use. The OpenAI, Anthropic, Deepgram, and Ollama providers are real.
+3. **Audio capture** is implemented as a stub structure; real I/O requires `cpal` and platform-specific loopback devices. File import, watch folder, and HTTP upload (localhost-only) work.
+4. **Local encryption passphrase** is stored in a 0600 file (or `RECAP_PASSPHRASE` env var) until the real unlock/keychain flow lands (IMPROVEMENT_PLAN.md P0-1). Passphrase *change* is intentionally disabled until re-encryption exists (P0-4).
+5. **Team server**: `sync_queue` has no consumer worker yet; no rate limiting; default JWT secret still boots with a warning (all tracked in IMPROVEMENT_PLAN.md P0-2 / P1-1).
+6. **Mobile companion app** and **iOS Shortcuts** are represented only as data types and sync contracts; no native mobile code exists yet.
+7. **E2E tests** are scaffolding only and require Playwright + built Tauri app to run.
 
 ---
 

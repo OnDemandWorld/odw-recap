@@ -14,15 +14,8 @@ impl WhisperLocalProvider {
     pub fn new(model_path: Option<String>) -> Self {
         Self { model_path }
     }
-
-    /// Load the whisper model (stub - would call whisper.cpp FFI)
-    async fn load_model(&self) -> Result<()> {
-        // In a real implementation, this would:
-        // 1. Check if model exists at model_path
-        // 2. Initialize whisper.cpp context
-        // 3. Load model weights
-        Ok(())
-    }
+    // A real implementation would add model loading here via whisper.cpp FFI;
+    // see IMPROVEMENT_PLAN.md.
 }
 
 #[async_trait]

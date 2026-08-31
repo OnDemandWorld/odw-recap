@@ -74,6 +74,7 @@ impl PromptTemplate {
     }
 
     /// Validate that all required variables are provided
+    #[allow(dead_code)]
     pub fn validate_variables(
         &self,
         provided: &std::collections::HashMap<String, String>,
@@ -82,7 +83,7 @@ impl PromptTemplate {
 
         for var in &self.variables {
             if var.required && !provided.contains_key(&var.name) {
-                if let Some(default) = &var.default_value {
+                if let Some(_default) = &var.default_value {
                     // Has default, not missing
                     continue;
                 }

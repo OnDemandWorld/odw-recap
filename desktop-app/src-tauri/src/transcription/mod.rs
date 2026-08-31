@@ -3,7 +3,6 @@ pub mod stt_router;
 pub mod providers;
 
 use crate::error::Result;
-use crate::storage::types::TranscriptSegment;
 use std::path::Path;
 
 pub use stt_provider::{STTProvider, TranscriptionConfig, TranscriptionResult};
@@ -28,6 +27,7 @@ impl TranscriptionManager {
         self.router.transcribe(audio_path, config).await
     }
 
+    #[allow(dead_code)]
     /// Get list of available STT providers
     pub fn available_providers(&self) -> Vec<String> {
         self.router.available_providers()

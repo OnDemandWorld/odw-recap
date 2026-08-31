@@ -14,11 +14,13 @@ pub struct EncryptionManager {
 }
 
 impl EncryptionManager {
+    /// Create a manager with a freshly generated random salt.
+    ///
+    /// NOTE: the salt MUST be persisted by the caller (see `StorageManager`).
+    /// Deriving keys with a different salt on each run would make previously
+    /// encrypted data unrecoverable.
     pub fn new() -> Self {
-        Self {
-            master_key: Arc::new(Mutex::new(None)),
-            salt: [0u8; 32],
-        }
+        Self::with_salt(Self::generate_salt())
     }
 
     pub fn with_salt(salt: [u8; 32]) -> Self {
@@ -26,6 +28,11 @@ impl EncryptionManager {
             master_key: Arc::new(Mutex::new(None)),
             salt,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn salt(&self) -> [u8; 32] {
+        self.salt
     }
 
     pub fn derive_key(&self, passphrase: &str) -> Result<[u8; 32]> {
@@ -57,6 +64,7 @@ impl EncryptionManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn is_unlocked(&self) -> bool {
         self.master_key
             .lock()
@@ -64,6 +72,9 @@ impl EncryptionManager {
             .unwrap_or(false)
     }
 
+    /// Replace the in-memory master key. Reserved for the future
+    /// re-encryption flow in `StorageManager::change_passphrase`.
+    #[allow(dead_code)]
     pub fn replace_key(&self, new_key: [u8; 32]) -> Result<()> {
         let mut guard = self.master_key.lock().map_err(|_| {
             RecapError::Encryption("Failed to lock master key".to_string())

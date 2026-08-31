@@ -1,3 +1,6 @@
+//! Scaffolded subsystem — wired up in a future milestone; see IMPROVEMENT_PLAN.md.
+#![allow(dead_code)]
+
 use crate::error::{RecapError, Result};
 use notify::Watcher;
 use std::path::PathBuf;
@@ -13,24 +16,41 @@ impl WatchFolderMonitor {
         Ok(Self { inbox_path })
     }
 
-    pub fn watch_with_callback<F>(&self, mut callback: F) -> Result<notify::RecommendedWatcher>
+    pub fn watch_with_callback<F>(&self, callback: F) -> Result<notify::RecommendedWatcher>
     where
         F: FnMut(PathBuf) + Send + 'static,
     {
         let inbox_path = self.inbox_path.clone();
+        let callback = std::sync::Arc::new(std::sync::Mutex::new(callback));
 
         let mut watcher = notify::recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res {
-                if let notify::EventKind::Create(_) = event.kind {
-                    for path in event.paths {
-                        let inbox = inbox_path.clone();
-                        if path.starts_with(&inbox) {
-                            if Self::wait_for_file_stable(&path) {
-                                callback(path);
-                            }
+            let Ok(event) = res else { return };
+            // Handle both newly created files and files moved into the folder.
+            let is_relevant = matches!(
+                event.kind,
+                notify::EventKind::Create(notify::event::CreateKind::File)
+                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                        notify::event::RenameMode::To
+                    ))
+            );
+            if !is_relevant {
+                return;
+            }
+
+            for path in event.paths {
+                if !path.starts_with(&inbox_path) {
+                    continue;
+                }
+                // The stability check sleeps for several seconds; run it off the
+                // notify dispatch thread so other events keep flowing.
+                let callback = callback.clone();
+                std::thread::spawn(move || {
+                    if Self::wait_for_file_stable(&path) {
+                        if let Ok(mut cb) = callback.lock() {
+                            cb(path);
                         }
                     }
-                }
+                });
             }
         }).map_err(|e| RecapError::AudioInput(e.to_string()))?;
 

@@ -1,23 +1,26 @@
 #!/bin/bash
+# Run every test suite in the repository.
 set -e
+
+# Always resolve paths relative to the repository root, regardless of where
+# the script is invoked from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+CARGO_BIN="cargo"
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+    CARGO_BIN="$HOME/.cargo/bin/cargo"
+fi
 
 echo "Running all tests..."
 
-# Run Rust tests
 echo "Running Rust tests..."
-cd desktop-app/src-tauri
-~/.cargo/bin/cargo test
-cd ../..
+(cd "$REPO_ROOT/desktop-app/src-tauri" && "$CARGO_BIN" test)
 
-# Run Go tests
 echo "Running Go tests..."
-cd ../team-server
-go test ./...
-cd ..
+(cd "$REPO_ROOT/team-server" && go test ./...)
 
-# Run frontend tests (if Jest is configured)
 echo "Running frontend tests..."
-cd desktop-app
-npm test
+(cd "$REPO_ROOT/desktop-app" && npm test)
 
 echo "All tests complete!"

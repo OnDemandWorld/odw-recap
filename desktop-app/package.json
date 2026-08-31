@@ -5,10 +5,17 @@
   "type": "module",
   "scripts": {
     "tauri": "tauri",
-    "test": "jest",
+    "test": "jest --passWithNoTests",
     "test:e2e": "playwright test",
     "build": "tauri build",
     "dev": "tauri dev"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/tests/"
+    ]
   },
   "devDependencies": {
     "@tauri-apps/cli": "^1.4.0",

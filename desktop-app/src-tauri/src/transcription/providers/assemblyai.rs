@@ -1,3 +1,6 @@
+//! Scaffolded subsystem — wired up in a future milestone; see IMPROVEMENT_PLAN.md.
+#![allow(dead_code)]
+
 use crate::error::{RecapError, Result};
 use crate::storage::types::TranscriptSegment;
 use crate::transcription::stt_provider::{STTProvider, TranscriptionConfig, TranscriptionResult};
@@ -60,10 +63,10 @@ impl STTProvider for AssemblyAIProvider {
 
     async fn transcribe(
         &self,
-        audio_path: &Path,
+        _audio_path: &Path,
         config: TranscriptionConfig,
     ) -> Result<TranscriptionResult> {
-        let api_key = self.api_key.as_ref().ok_or_else(|| {
+        let _api_key = self.api_key.as_ref().ok_or_else(|| {
             RecapError::Provider {
                 provider: "assemblyai".to_string(),
                 message: "API key not configured".to_string(),
@@ -74,7 +77,7 @@ impl STTProvider for AssemblyAIProvider {
         // In production, you'd upload to a temporary storage or use their upload endpoint
         // For now, this is a stub that demonstrates the API structure
 
-        let request = TranscriptRequest {
+        let _request = TranscriptRequest {
             audio_url: "https://example.com/audio.mp3".to_string(), // Would be actual URL
             language_code: config.language.clone(),
         };

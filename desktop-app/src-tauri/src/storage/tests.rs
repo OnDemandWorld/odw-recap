@@ -94,4 +94,140 @@ mod tests {
         let (content, _, _) = template.unwrap();
         assert_eq!(content, "Summarize this meeting: {{transcript}}");
     }
+
+    #[test]
+    fn test_transcript_segments_roundtrip_and_fts_search() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        let meeting = create_test_meeting();
+        storage.create_meeting(&meeting).unwrap();
+
+        storage
+            .insert_transcript_segment(&crate::storage::types::TranscriptSegment {
+                id: 0,
+                meeting_id: meeting.id,
+                start_ms: 0,
+                end_ms: 2500,
+                text: "We need to finalize the quarterly budget".to_string(),
+                speaker_id: None,
+                confidence: 0.9,
+                is_final: true,
+                version: 1,
+            })
+            .unwrap();
+        storage
+            .insert_transcript_segment(&crate::storage::types::TranscriptSegment {
+                id: 0,
+                meeting_id: meeting.id,
+                start_ms: 2500,
+                end_ms: 5000,
+                text: "Agreed, let us schedule a follow-up".to_string(),
+                speaker_id: Some("speaker-1".to_string()),
+                confidence: 0.8,
+                is_final: true,
+                version: 1,
+            })
+            .unwrap();
+
+        let segments = storage.get_transcript_segments(meeting.id).unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].meeting_id, meeting.id);
+        assert_eq!(segments[1].speaker_id.as_deref(), Some("speaker-1"));
+
+        // The FTS index is kept in sync via triggers; search must find text.
+        let results = storage.search_transcripts("budget", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, meeting.id);
+        assert!(results[0].1.contains("quarterly budget"));
+
+        // Porter stemming: "finalizes" should match "finalize".
+        let stemmed = storage.search_transcripts("finalizes", 10).unwrap();
+        assert_eq!(stemmed.len(), 1);
+    }
+
+    #[test]
+    fn test_summary_storage() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        let meeting = create_test_meeting();
+        storage.create_meeting(&meeting).unwrap();
+
+        storage
+            .save_summary(&crate::storage::types::Summary {
+                id: 0,
+                meeting_id: meeting.id,
+                content: "Short summary of the meeting.".to_string(),
+                generation_mode: "rule_based".to_string(),
+                model_used: None,
+                created_at: 1,
+                updated_at: 1,
+                user_edited: false,
+            })
+            .unwrap();
+
+        let summary = storage.get_summary(meeting.id).unwrap().unwrap();
+        assert_eq!(summary.content, "Short summary of the meeting.");
+        assert_eq!(summary.generation_mode, "rule_based");
+
+        // Saving again replaces the previous summary.
+        storage
+            .save_summary(&crate::storage::types::Summary {
+                id: 0,
+                meeting_id: meeting.id,
+                content: "Updated summary".to_string(),
+                generation_mode: "llm".to_string(),
+                model_used: Some("test-model".to_string()),
+                created_at: 2,
+                updated_at: 2,
+                user_edited: false,
+            })
+            .unwrap();
+        let summary = storage.get_summary(meeting.id).unwrap().unwrap();
+        assert_eq!(summary.content, "Updated summary");
+    }
+
+    #[test]
+    fn test_salt_persists_across_reopen() {
+        // Regression test: the KDF salt must be persisted, otherwise data
+        // encrypted in one session cannot be decrypted in the next.
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+
+        {
+            let storage = StorageManager::new(data_dir.clone(), "test-passphrase").unwrap();
+            storage.save_api_key("openai", "sk-secret-123").unwrap();
+        }
+
+        // Reopen with the same passphrase: the API key must still decrypt.
+        let storage = StorageManager::new(data_dir.clone(), "test-passphrase").unwrap();
+        assert_eq!(
+            storage.get_api_key("openai").unwrap(),
+            Some("sk-secret-123".to_string())
+        );
+
+        // A wrong passphrase must not be able to decrypt it.
+        let wrong = StorageManager::new(data_dir, "wrong-passphrase").unwrap();
+        assert!(wrong.get_api_key("openai").is_err());
+    }
+
+    #[test]
+    fn test_list_prompt_templates() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        storage
+            .save_prompt_template("Template A", "Content A {{var}}", None, false)
+            .unwrap();
+        storage
+            .save_prompt_template("Template B", "Content B", Some("standup"), true)
+            .unwrap();
+
+        let templates = storage.list_prompt_templates().unwrap();
+        assert_eq!(templates.len(), 2);
+        assert_eq!(templates[0].0, "Template A");
+        assert_eq!(templates[1].2, Some("standup".to_string()));
+        assert!(templates[1].3);
+    }
 }

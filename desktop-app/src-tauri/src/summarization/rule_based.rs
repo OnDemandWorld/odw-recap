@@ -162,3 +162,34 @@ impl Default for RuleBasedSummarizer {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rule_based_summarizer_extracts_structure() {
+        let text = "The team decided to launch in March. We need to finish the billing \
+                    integration before that. The launch date was agreed by everyone. \
+                    Budget planning will continue next quarter.";
+        let summarizer = RuleBasedSummarizer::new();
+        let result = summarizer
+            .summarize(text, SummarizationConfig::default())
+            .unwrap();
+
+        assert!(!result.summary.is_empty());
+        assert!(result.decisions.iter().any(|d| d.contains("decided")));
+        assert!(result.action_items.iter().any(|a| a.contains("need to")));
+        assert_eq!(result.provider, "rule_based");
+    }
+
+    #[test]
+    fn test_rule_based_handles_empty_input() {
+        let summarizer = RuleBasedSummarizer::new();
+        let result = summarizer
+            .summarize("", SummarizationConfig::default())
+            .unwrap();
+        assert_eq!(result.summary, "");
+        assert!(result.action_items.is_empty());
+    }
+}

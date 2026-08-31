@@ -40,6 +40,8 @@ impl AnthropicProvider {
         }
     }
 
+    /// Builder reserved for dynamic credential injection (see IMPROVEMENT_PLAN.md).
+    #[allow(dead_code)]
     pub fn with_api_key(mut self, api_key: String) -> Self {
         self.api_key = Some(api_key);
         self

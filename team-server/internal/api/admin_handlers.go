@@ -60,26 +60,31 @@ func (s *Server) adminAuditLogHandler(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{"audit_log": logs})
 }
 
+// statsQueries maps each stat name to a fixed COUNT query. Queries are static
+// literals — table names are never assembled from user input.
+var statsQueries = map[string]string{
+	"users":         "SELECT COUNT(*) FROM users",
+	"meetings":      "SELECT COUNT(*) FROM meetings",
+	"organizations": "SELECT COUNT(*) FROM organizations",
+	"sync_queue":    "SELECT COUNT(*) FROM sync_queue",
+	"transcripts":   "SELECT COUNT(*) FROM transcript_segments",
+	"action_items":  "SELECT COUNT(*) FROM action_items",
+	"decisions":     "SELECT COUNT(*) FROM decisions",
+	"audit_log":     "SELECT COUNT(*) FROM audit_log",
+}
+
 func (s *Server) adminStatsHandler(w http.ResponseWriter, r *http.Request) {
-	stats := map[string]interface{}{
-		"users":           s.count("users"),
-		"meetings":        s.count("meetings"),
-		"organizations":   s.count("organizations"),
-		"sync_queue":      s.count("sync_queue"),
-		"transcripts":     s.count("transcript_segments"),
-		"action_items":    s.count("action_items"),
-		"decisions":       s.count("decisions"),
-		"audit_log":       s.count("audit_log"),
+	stats := make(map[string]interface{}, len(statsQueries))
+	for name, query := range statsQueries {
+		stats[name] = s.count(query)
 	}
 
 	respondJSON(w, http.StatusOK, stats)
 }
 
-func (s *Server) count(table string) int {
+func (s *Server) count(query string) int {
 	var count int
-	// Note: In production, never use raw table names like this
-	// This is a simplified example
-	row := s.db.DB().QueryRow("SELECT COUNT(*) FROM " + table)
+	row := s.db.DB().QueryRow(query)
 	if err := row.Scan(&count); err != nil {
 		return 0
 	}

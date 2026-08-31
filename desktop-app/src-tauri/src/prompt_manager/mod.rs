@@ -25,7 +25,7 @@ impl PromptManager {
             crate::error::RecapError::Storage("Failed to lock storage".to_string())
         })?;
         let result = storage.get_prompt_template(name)?;
-        Ok(result.map(|(content, meeting_type, is_custom)| {
+        Ok(result.map(|(content, _meeting_type, _is_custom)| {
             let variables = PromptTemplate::extract_variables(&content);
             PromptTemplate {
                 id: 0, // ID not stored in current schema
@@ -52,12 +52,26 @@ impl PromptManager {
         let storage = self.storage.lock().map_err(|_| {
             crate::error::RecapError::Storage("Failed to lock storage".to_string())
         })?;
-        // Note: This would need a list_prompt_templates method in StorageManager
-        // For now, return empty vec
-        Ok(Vec::new())
+        let rows = storage.list_prompt_templates()?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, content, _meeting_type, _is_custom)| {
+                let variables = PromptTemplate::extract_variables(&content);
+                PromptTemplate {
+                    id: 0, // autoincrement id not surfaced through StorageManager yet
+                    name,
+                    description: String::new(),
+                    content,
+                    variables,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                    updated_at: chrono::Utc::now().timestamp_millis(),
+                }
+            })
+            .collect())
     }
 
     /// Render a prompt template with variable substitution
+    #[allow(dead_code)]
     pub fn render_template(
         &self,
         template_name: &str,
@@ -126,7 +140,11 @@ impl PromptManager {
         ];
 
         for template in default_templates {
-            self.save_template(&template)?;
+            // Only seed templates that don't exist yet so user edits to the
+            // defaults survive restarts.
+            if self.get_template(&template.name)?.is_none() {
+                self.save_template(&template)?;
+            }
         }
 
         Ok(())

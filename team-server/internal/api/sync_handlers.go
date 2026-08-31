@@ -25,6 +25,14 @@ type SyncResponse struct {
 	Message   string `json:"message,omitempty"`
 }
 
+// validSyncActions enumerates the accepted sync actions.
+var validSyncActions = map[string]bool{
+	"create": true,
+	"update": true,
+	"delete": true,
+	"upsert": true,
+}
+
 func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 	user := auth.GetUserFromContext(r.Context())
 	if user == nil {
@@ -38,9 +46,32 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !validSyncActions[req.Action] {
+		respondError(w, http.StatusBadRequest, "Invalid action: must be one of create, update, delete, upsert")
+		return
+	}
+
 	meetingID := req.MeetingID
 	if meetingID == "" {
 		meetingID = uuid.New().String()
+	}
+	if _, err := uuid.Parse(meetingID); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid meeting_id")
+		return
+	}
+
+	// sync_queue.meeting_id references meetings(id), so ensure the meeting
+	// exists before queueing. This makes the endpoint idempotent for new
+	// meetings created on the desktop.
+	_, err := s.db.DB().Exec(
+		`INSERT INTO meetings (id, created_by, status, created_at, updated_at)
+		 VALUES ($1, $2, 'pending', $3, $3)
+		 ON CONFLICT (id) DO NOTHING`,
+		meetingID, user.ID, time.Now(),
+	)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to prepare sync")
+		return
 	}
 
 	// Queue sync item for processing

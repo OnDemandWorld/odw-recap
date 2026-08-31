@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -40,16 +41,17 @@ pub enum MeetingStatus {
     Deleted,
 }
 
-impl ToString for MeetingStatus {
-    fn to_string(&self) -> String {
-        match self {
-            MeetingStatus::Recording => "recording".to_string(),
-            MeetingStatus::Processing => "processing".to_string(),
-            MeetingStatus::Completed => "completed".to_string(),
-            MeetingStatus::Failed => "failed".to_string(),
-            MeetingStatus::Archived => "archived".to_string(),
-            MeetingStatus::Deleted => "deleted".to_string(),
-        }
+impl fmt::Display for MeetingStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            MeetingStatus::Recording => "recording",
+            MeetingStatus::Processing => "processing",
+            MeetingStatus::Completed => "completed",
+            MeetingStatus::Failed => "failed",
+            MeetingStatus::Archived => "archived",
+            MeetingStatus::Deleted => "deleted",
+        };
+        f.write_str(s)
     }
 }
 
@@ -75,15 +77,16 @@ pub enum SyncStatus {
     PermanentlyFailed,
 }
 
-impl ToString for SyncStatus {
-    fn to_string(&self) -> String {
-        match self {
-            SyncStatus::NotSynced => "not_synced".to_string(),
-            SyncStatus::Syncing => "syncing".to_string(),
-            SyncStatus::Synced => "synced".to_string(),
-            SyncStatus::Failed => "failed".to_string(),
-            SyncStatus::PermanentlyFailed => "permanently_failed".to_string(),
-        }
+impl fmt::Display for SyncStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            SyncStatus::NotSynced => "not_synced",
+            SyncStatus::Syncing => "syncing",
+            SyncStatus::Synced => "synced",
+            SyncStatus::Failed => "failed",
+            SyncStatus::PermanentlyFailed => "permanently_failed",
+        };
+        f.write_str(s)
     }
 }
 
@@ -107,14 +110,15 @@ pub enum AudioSource {
     WatchFolder,
 }
 
-impl ToString for AudioSource {
-    fn to_string(&self) -> String {
-        match self {
-            AudioSource::SystemCapture => "system_capture".to_string(),
-            AudioSource::FileImport => "file_import".to_string(),
-            AudioSource::MobileUpload => "mobile_upload".to_string(),
-            AudioSource::WatchFolder => "watch_folder".to_string(),
-        }
+impl fmt::Display for AudioSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            AudioSource::SystemCapture => "system_capture",
+            AudioSource::FileImport => "file_import",
+            AudioSource::MobileUpload => "mobile_upload",
+            AudioSource::WatchFolder => "watch_folder",
+        };
+        f.write_str(s)
     }
 }
 
@@ -143,6 +147,9 @@ pub struct TranscriptSegment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Part of the data model; produced once action-item/decision extraction and
+/// diarization land (see IMPROVEMENT_PLAN.md).
+#[allow(dead_code)]
 pub struct Speaker {
     pub id: String,
     pub meeting_id: Uuid,
@@ -164,6 +171,9 @@ pub struct Summary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Part of the data model; produced once action-item/decision extraction and
+/// diarization land (see IMPROVEMENT_PLAN.md).
+#[allow(dead_code)]
 pub struct ActionItem {
     pub id: Uuid,
     pub meeting_id: Uuid,
@@ -179,6 +189,9 @@ pub struct ActionItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Part of the data model; produced once action-item/decision extraction and
+/// diarization land (see IMPROVEMENT_PLAN.md).
+#[allow(dead_code)]
 pub struct Decision {
     pub id: Uuid,
     pub meeting_id: Uuid,

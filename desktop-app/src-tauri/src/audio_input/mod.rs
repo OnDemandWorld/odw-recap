@@ -1,54 +1,47 @@
 use crate::error::{RecapError, Result};
-use crate::storage::StorageManager;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 pub mod file_importer;
 pub mod http_upload_server;
 pub mod watch_folder_monitor;
 
+/// Audio extensions accepted by the import pipeline.
+pub const SUPPORTED_AUDIO_FORMATS: &[&str] = &["m4a", "wav", "mp3", "ogg", "webm", "flac"];
+
 pub struct AudioInputManager {
-    storage: Arc<Mutex<StorageManager>>,
     inbox_path: PathBuf,
-    supported_formats: Vec<String>,
+    // Watch-folder and HTTP-upload support are wired up in a later milestone.
+    #[allow(dead_code)]
     watch_monitor: Option<watch_folder_monitor::WatchFolderMonitor>,
+    #[allow(dead_code)]
     http_server: Option<http_upload_server::HttpUploadServer>,
 }
 
 impl AudioInputManager {
-    pub fn new(storage: Arc<Mutex<StorageManager>>, inbox_path: PathBuf) -> Self {
-        let supported_formats = vec![
-            "m4a".to_string(),
-            "wav".to_string(),
-            "mp3".to_string(),
-            "ogg".to_string(),
-            "webm".to_string(),
-            "flac".to_string(),
-        ];
-
+    pub fn new(inbox_path: PathBuf) -> Self {
         Self {
-            storage,
             inbox_path,
-            supported_formats,
             watch_monitor: None,
             http_server: None,
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_inbox_path(&mut self, path: PathBuf) {
         self.inbox_path = path;
     }
 
+    #[allow(dead_code)]
     pub fn get_inbox_path(&self) -> &Path {
         &self.inbox_path
     }
 
-    pub fn is_supported_format(&self, path: &Path) -> bool {
+    pub fn is_supported_format(path: &Path) -> bool {
         match path.extension() {
             Some(ext) => {
                 let ext = ext.to_string_lossy().to_lowercase();
-                self.supported_formats.contains(&ext.to_string())
+                SUPPORTED_AUDIO_FORMATS.contains(&ext.as_str())
             }
             None => false,
         }
@@ -62,7 +55,7 @@ impl AudioInputManager {
             )));
         }
 
-        if !self.is_supported_format(path) {
+        if !Self::is_supported_format(path) {
             return Err(RecapError::AudioInput(format!(
                 "Unsupported audio format: {}. Supported: M4A, WAV, MP3, OGG, WebM, FLAC",
                 path.display()
@@ -72,27 +65,43 @@ impl AudioInputManager {
         Ok(())
     }
 
-    pub fn import_file(&self, source_path: &Path) -> Result<PathBuf> {
+    /// Copy a source file into the inbox under a unique name and return the
+    /// destination path together with the file size.
+    pub fn import_file(&self, source_path: &Path) -> Result<ImportedFile> {
         self.validate_file(source_path)?;
 
         let ext = source_path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("opus");
+            .map(|e| e.to_lowercase())
+            .unwrap_or_else(|| "opus".to_string());
         let uuid = Uuid::new_v4();
         let dest_path = self.inbox_path.join(format!("{}.{}", uuid, ext));
 
+        std::fs::create_dir_all(&self.inbox_path)?;
         std::fs::copy(source_path, &dest_path)?;
 
-        Ok(dest_path)
+        let size_bytes = std::fs::metadata(&dest_path)?.len();
+
+        Ok(ImportedFile {
+            path: dest_path,
+            extension: ext,
+            size_bytes,
+            original_name: source_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        })
     }
 
+    #[allow(dead_code)]
     pub fn start_watch_folder(&mut self) -> Result<()> {
         let monitor = watch_folder_monitor::WatchFolderMonitor::new(self.inbox_path.clone())?;
         self.watch_monitor = Some(monitor);
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn start_http_server(&mut self, port: u16) -> Result<()> {
         let server = http_upload_server::HttpUploadServer::new(port, self.inbox_path.clone())?;
         self.http_server = Some(server);
@@ -100,13 +109,10 @@ impl AudioInputManager {
     }
 }
 
-pub fn get_supported_audio_formats() -> Vec<String> {
-    vec![
-        "m4a".to_string(),
-        "wav".to_string(),
-        "mp3".to_string(),
-        "ogg".to_string(),
-        "webm".to_string(),
-        "flac".to_string(),
-    ]
+/// Metadata about a file that was copied into the inbox.
+pub struct ImportedFile {
+    pub path: PathBuf,
+    pub extension: String,
+    pub size_bytes: u64,
+    pub original_name: String,
 }

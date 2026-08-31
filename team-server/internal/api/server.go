@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -11,6 +14,10 @@ import (
 	"github.com/ondemandworld/recap-team-server/internal/auth"
 	"github.com/ondemandworld/recap-team-server/internal/db"
 )
+
+// maxJSONBodyBytes caps the size of JSON request bodies to prevent abuse.
+// Sync payloads embed transcript data, so this is generous but bounded.
+const maxJSONBodyBytes = 10 << 20 // 10 MiB
 
 // Server represents the API server
 type Server struct {
@@ -40,13 +47,24 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Timeout(60 * time.Second))
 
-	// CORS
+	// CORS: origins are configurable via CORS_ALLOWED_ORIGINS (comma-separated).
+	// Never combine a wildcard origin with AllowCredentials — that would let any
+	// website make credentialed requests to this API.
+	allowedOrigins := []string{"*"}
+	allowCredentials := false
+	if origins := os.Getenv("CORS_ALLOWED_ORIGINS"); origins != "" {
+		allowedOrigins = strings.Split(origins, ",")
+		for i := range allowedOrigins {
+			allowedOrigins[i] = strings.TrimSpace(allowedOrigins[i])
+		}
+		allowCredentials = true
+	}
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
+		AllowCredentials: allowCredentials,
 		MaxAge:           300,
 	}))
 
@@ -91,7 +109,8 @@ func respondJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Headers are already written; we can only log the failure.
+		log.Printf("respondJSON: failed to encode payload: %v", err)
 	}
 }
 

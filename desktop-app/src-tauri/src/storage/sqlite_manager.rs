@@ -1,15 +1,23 @@
 use crate::error::{RecapError, Result};
 use crate::storage::types::*;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub struct SqliteManager {
     conn: Connection,
 }
 
+/// Parse a UUID stored in the database, propagating an error instead of
+/// silently inventing a new ID (which would corrupt lookups).
+fn parse_stored_uuid(raw: &str) -> Result<Uuid> {
+    Uuid::parse_str(raw).map_err(|e| {
+        RecapError::Database(format!("Invalid UUID '{}' in database: {}", raw, e))
+    })
+}
+
 impl SqliteManager {
-    pub fn new(db_path: &PathBuf) -> Result<Self> {
+    pub fn new(db_path: &Path) -> Result<Self> {
         let conn = Connection::open(db_path)?;
         let manager = Self { conn };
         manager.migrate()?;
@@ -129,8 +137,24 @@ impl SqliteManager {
     }
 
     fn row_to_meeting(row: &rusqlite::Row) -> rusqlite::Result<Meeting> {
+        // Map conversion errors into rusqlite errors so a corrupt row surfaces
+        // instead of being silently replaced with a random ID.
+        let parse_uuid = |name: &str| -> rusqlite::Result<Uuid> {
+            let raw: String = row.get(name)?;
+            Uuid::parse_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid UUID '{}' in column '{}': {}", raw, name, e),
+                    )),
+                )
+            })
+        };
+
         Ok(Meeting {
-            id: Uuid::parse_str(&row.get::<_, String>("id")?).unwrap_or_else(|_| Uuid::new_v4()),
+            id: parse_uuid("id")?,
             title: row.get("title")?,
             started_at: row.get("started_at")?,
             ended_at: row.get("ended_at")?,
@@ -141,8 +165,19 @@ impl SqliteManager {
             audio_size_bytes: row.get("audio_size_bytes")?,
             model_used: row.get("model_used")?,
             tags: serde_json::from_str(&row.get::<_, String>("tags")?).unwrap_or_default(),
-            folder_id: row.get::<_, Option<String>>("folder_id")?
-                .and_then(|s| Uuid::parse_str(&s).ok()),
+            folder_id: match row.get::<_, Option<String>>("folder_id")? {
+                Some(s) => Some(Uuid::parse_str(&s).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid folder_id UUID '{}': {}", s, e),
+                        )),
+                    )
+                })?),
+                None => None,
+            },
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
             sync_status: row.get::<_, String>("sync_status")?.into(),
@@ -161,26 +196,148 @@ impl SqliteManager {
 
     pub fn search_transcripts(&self, query: &str, limit: i64) -> Result<Vec<(Uuid, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, ts.text FROM transcript_search ts
-             JOIN transcript_segments tseg ON ts.rowid = tseg.rowid
+            "SELECT m.id, tseg.text FROM transcript_search ts
+             JOIN transcript_segments tseg ON ts.rowid = tseg.id
              JOIN meetings m ON tseg.meeting_id = m.id
              WHERE transcript_search MATCH ?1
              LIMIT ?2"
         )?;
 
-        let limit_str = limit.to_string();
-        let results = stmt.query_map([query, &limit_str], |row| {
-            Ok((
-                Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::new_v4()),
-                row.get::<_, String>(1)?,
-            ))
+        let results = stmt.query_map(params![query, limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
         let mut output = Vec::new();
         for result in results {
-            output.push(result?);
+            let (id_raw, text) = result?;
+            output.push((parse_stored_uuid(&id_raw)?, text));
         }
         Ok(output)
+    }
+
+    /// Insert a transcript segment. Triggers keep the `transcript_search`
+    /// FTS5 index in sync (see migrations).
+    pub fn insert_transcript_segment(&self, segment: &TranscriptSegment) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO transcript_segments (
+                meeting_id, start_ms, end_ms, text, speaker_id, confidence, is_final, version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                segment.meeting_id.to_string(),
+                segment.start_ms,
+                segment.end_ms,
+                segment.text,
+                segment.speaker_id,
+                segment.confidence,
+                if segment.is_final { 1 } else { 0 },
+                segment.version,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load all transcript segments for a meeting, ordered by start time.
+    pub fn get_transcript_segments(&self, meeting_id: Uuid) -> Result<Vec<TranscriptSegment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, meeting_id, start_ms, end_ms, text, speaker_id, confidence, is_final, version
+             FROM transcript_segments WHERE meeting_id = ?1 ORDER BY start_ms ASC",
+        )?;
+
+        let rows = stmt.query_map([meeting_id.to_string()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, i32>(7)?,
+                row.get::<_, i32>(8)?,
+            ))
+        })?;
+
+        let mut segments = Vec::new();
+        for row in rows {
+            let (id, meeting_raw, start_ms, end_ms, text, speaker_id, confidence, is_final, version) = row?;
+            segments.push(TranscriptSegment {
+                id,
+                meeting_id: parse_stored_uuid(&meeting_raw)?,
+                start_ms,
+                end_ms,
+                text,
+                speaker_id,
+                confidence: confidence as f32,
+                is_final: is_final != 0,
+                version,
+            });
+        }
+        Ok(segments)
+    }
+
+    /// Save (or replace) the summary for a meeting. Keeps the most recent
+    /// summary per meeting by deleting any previous one first.
+    pub fn save_summary(&self, summary: &Summary) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM summaries WHERE meeting_id = ?1",
+            params![summary.meeting_id.to_string()],
+        )?;
+        self.conn.execute(
+            "INSERT INTO summaries (
+                meeting_id, content, generation_mode, model_used, created_at, updated_at, user_edited
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                summary.meeting_id.to_string(),
+                summary.content,
+                summary.generation_mode,
+                summary.model_used,
+                summary.created_at,
+                summary.updated_at,
+                if summary.user_edited { 1 } else { 0 },
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get the current summary for a meeting, if any.
+    pub fn get_summary(&self, meeting_id: Uuid) -> Result<Option<Summary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, meeting_id, content, generation_mode, model_used, created_at, updated_at, user_edited
+             FROM summaries WHERE meeting_id = ?1 ORDER BY id DESC LIMIT 1",
+        )?;
+
+        let result = stmt
+            .query_row(params![meeting_id.to_string()], |row| {
+                let meeting_raw: String = row.get(1)?;
+                let user_edited: i32 = row.get(7)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    meeting_raw,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    user_edited,
+                ))
+            })
+            .optional()?;
+
+        match result {
+            Some((id, meeting_raw, content, generation_mode, model_used, created_at, updated_at, user_edited)) => {
+                Ok(Some(Summary {
+                    id,
+                    meeting_id: parse_stored_uuid(&meeting_raw)?,
+                    content,
+                    generation_mode,
+                    model_used,
+                    created_at,
+                    updated_at,
+                    user_edited: user_edited != 0,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn save_api_key(&self, provider: &str, key_encrypted: &str) -> Result<()> {
@@ -219,6 +376,28 @@ impl SqliteManager {
             ))
         }).optional()?;
         Ok(result)
+    }
+
+    /// List all prompt templates ordered by name. Returns
+    /// `(name, content, meeting_type, is_custom)` tuples.
+    pub fn list_prompt_templates(&self) -> Result<Vec<(String, String, Option<String>, bool)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, content, meeting_type, is_custom FROM prompt_templates ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i32>(3)? == 1,
+            ))
+        })?;
+
+        let mut templates = Vec::new();
+        for row in rows {
+            templates.push(row?);
+        }
+        Ok(templates)
     }
 
     pub fn get_config_value(&self, key: &str) -> Result<Option<String>> {
@@ -376,6 +555,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS transcript_search USING fts5(
     tokenize='porter unicode61 remove_diacritics 2'
 );
 
+-- Keep the external-content FTS index in sync with transcript_segments.
+-- Without these triggers the index stays empty and MATCH returns nothing.
+CREATE TRIGGER IF NOT EXISTS transcript_segments_ai AFTER INSERT ON transcript_segments BEGIN
+    INSERT INTO transcript_search(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS transcript_segments_ad AFTER DELETE ON transcript_segments BEGIN
+    INSERT INTO transcript_search(transcript_search, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS transcript_segments_au AFTER UPDATE OF text ON transcript_segments BEGIN
+    INSERT INTO transcript_search(transcript_search, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO transcript_search(rowid, text) VALUES (new.id, new.text);
+END;
+
 CREATE TABLE IF NOT EXISTS sync_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_type TEXT NOT NULL,
@@ -392,4 +584,8 @@ CREATE TABLE IF NOT EXISTS sync_queue (
 
 CREATE INDEX IF NOT EXISTS idx_sync_queue_next_retry ON sync_queue(next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);
+
+-- Rebuild the FTS index from transcript_segments so rows inserted before the
+-- triggers existed also become searchable. Idempotent.
+INSERT INTO transcript_search(transcript_search) VALUES ('rebuild');
 "#;

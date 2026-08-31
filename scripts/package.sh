@@ -1,38 +1,34 @@
 #!/bin/bash
+# Package Recap artifacts for distribution.
 set -e
 
-echo "Packaging Recap for distribution..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Detect platform
 PLATFORM=$(uname -s)
 ARCH=$(uname -m)
 
 echo "Packaging for $PLATFORM ($ARCH)..."
 
-# Package desktop app
 echo "Packaging desktop app..."
-cd desktop-app
-npm install
-npm run tauri build
+(cd "$REPO_ROOT/desktop-app" && npm install && npm run tauri build)
 
-# Package team server
 echo "Packaging team server..."
-cd ../team-server
-go build -o recap-team-server ./cmd/server
+(cd "$REPO_ROOT/team-server" && go build -o recap-team-server ./cmd/server)
 
-# Create distribution directory
-mkdir -p ../dist
-cp recap-team-server ../dist/
+DIST_DIR="$REPO_ROOT/dist"
+mkdir -p "$DIST_DIR"
+cp "$REPO_ROOT/team-server/recap-team-server" "$DIST_DIR/"
 
 if [ "$PLATFORM" = "Darwin" ]; then
-    cp -r src-tauri/target/release/bundle/dmg/*.dmg ../dist/ 2>/dev/null || true
-    cp -r src-tauri/target/release/bundle/macos/*.app ../dist/ 2>/dev/null || true
+    cp -r "$REPO_ROOT"/desktop-app/src-tauri/target/release/bundle/dmg/*.dmg "$DIST_DIR/" 2>/dev/null || true
+    cp -r "$REPO_ROOT"/desktop-app/src-tauri/target/release/bundle/macos/*.app "$DIST_DIR/" 2>/dev/null || true
 elif [ "$PLATFORM" = "Linux" ]; then
-    cp src-tauri/target/release/bundle/deb/*.deb ../dist/ 2>/dev/null || true
-    cp src-tauri/target/release/bundle/appimage/*.AppImage ../dist/ 2>/dev/null || true
-elif [ "$PLATFORM" = "MINGW"* ] || [ "$PLATFORM" = "CYGWIN"* ]; then
-    cp src-tauri/target/release/bundle/msi/*.msi ../dist/ 2>/dev/null || true
-    cp src-tauri/target/release/bundle/nsis/*.exe ../dist/ 2>/dev/null || true
+    cp "$REPO_ROOT"/desktop-app/src-tauri/target/release/bundle/deb/*.deb "$DIST_DIR/" 2>/dev/null || true
+    cp "$REPO_ROOT"/desktop-app/src-tauri/target/release/bundle/appimage/*.AppImage "$DIST_DIR/" 2>/dev/null || true
+elif [[ "$PLATFORM" == MINGW* ]] || [[ "$PLATFORM" == CYGWIN* ]]; then
+    cp "$REPO_ROOT"/desktop-app/src-tauri/target/release/bundle/msi/*.msi "$DIST_DIR/" 2>/dev/null || true
+    cp "$REPO_ROOT"/desktop-app/src-tauri/target/release/bundle/nsis/*.exe "$DIST_DIR/" 2>/dev/null || true
 fi
 
-echo "Packaging complete! Artifacts in dist/"
+echo "Packaging complete! Artifacts in $DIST_DIR"

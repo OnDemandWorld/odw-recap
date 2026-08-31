@@ -4,8 +4,6 @@ pub mod providers;
 pub mod rule_based;
 
 use crate::error::Result;
-use crate::storage::types::Summary;
-use std::path::Path;
 
 pub use llm_provider::{LLMProvider, SummarizationConfig, SummarizationResult};
 pub use llm_router::LLMRouter;
@@ -38,6 +36,7 @@ impl SummarizationManager {
         self.router.summarize(text, config).await
     }
 
+    #[allow(dead_code)]
     /// Get list of available LLM providers
     pub fn available_providers(&self) -> Vec<String> {
         self.router.available_providers()

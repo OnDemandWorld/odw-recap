@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Configuration for summarization
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SummarizationConfig {
+    /// Which registered provider to use; falls back to the router default.
+    pub provider: Option<String>,
     pub max_length: usize,
     pub include_action_items: bool,
     pub include_decisions: bool,
@@ -18,6 +20,7 @@ pub struct SummarizationConfig {
 impl Default for SummarizationConfig {
     fn default() -> Self {
         Self {
+            provider: None,
             max_length: 500,
             include_action_items: true,
             include_decisions: true,

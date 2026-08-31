@@ -1,15 +1,13 @@
+//! LLM provider implementations.
+//!
+//! Provider structs are constructed through `LLMRouter::with_all_providers`
+//! (see `crate::summarization`), which keys them by the names used in the
+//! desktop UI settings.
+
+pub mod anthropic;
+pub mod aws_bedrock;
+pub mod azure;
+pub mod google;
 pub mod llama_local;
 pub mod ollama;
 pub mod openai;
-pub mod anthropic;
-pub mod google;
-pub mod aws_bedrock;
-pub mod azure;
-
-pub use llama_local::LlamaLocalProvider;
-pub use ollama::OllamaProvider;
-pub use openai::OpenAIProvider;
-pub use anthropic::AnthropicProvider;
-pub use google::GoogleProvider;
-pub use aws_bedrock::AWSBedrockProvider;
-pub use azure::AzureProvider;

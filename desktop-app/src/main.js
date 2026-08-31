@@ -1,5 +1,10 @@
-import { invoke } from "@tauri-apps/api/tauri";
-import { open } from "@tauri-apps/api/dialog";
+// Recap desktop frontend.
+//
+// Note: this project serves the frontend directly (no bundler), so the
+// `@tauri-apps/api` npm package cannot be imported here. We use the global
+// API injected by Tauri (`withGlobalTauri: true` in tauri.conf.json).
+const { invoke } = window.__TAURI__.tauri;
+const { open: openDialog } = window.__TAURI__.dialog;
 
 // State
 let meetings = [];
@@ -8,40 +13,43 @@ let currentMeetingId = null;
 
 // DOM Elements
 let meetingListEl;
-let importSectionEl;
-let settingsSectionEl;
 let statusEl;
 let meetingDetailEl;
+let templateListEl;
+
+const SUPPORTED_EXTENSIONS = ["m4a", "wav", "mp3", "ogg", "webm", "flac"];
 
 // Initialize app
 async function init() {
   meetingListEl = document.querySelector("#meeting-list");
-  importSectionEl = document.querySelector("#import-section");
-  settingsSectionEl = document.querySelector("#settings-section");
   statusEl = document.querySelector("#status-bar");
   meetingDetailEl = document.querySelector("#meeting-detail");
+  templateListEl = document.querySelector("#template-list");
 
-  // Setup event listeners
+  // Navigation
   document.querySelector("#nav-library").addEventListener("click", () => showView("library"));
   document.querySelector("#nav-import").addEventListener("click", () => showView("import"));
   document.querySelector("#nav-settings").addEventListener("click", () => showView("settings"));
   document.querySelector("#import-file-btn").addEventListener("click", importAudioFile);
   document.querySelector("#refresh-btn").addEventListener("click", loadMeetings);
-  document.querySelector("#back-to-library-btn").addEventListener("click", () => showView("library"));
-  document.querySelector("#save-api-keys-btn").addEventListener("click", saveApiKeys);
+  document.querySelector("#save-api-keys-btn").addEventListener("click", saveSettings);
   document.querySelector("#create-template-btn").addEventListener("click", createPromptTemplate);
 
-  // Load initial data
-  await loadMeetings();
-  await loadSupportedFormats();
+  await Promise.all([
+    loadMeetings(),
+    loadSupportedFormats(),
+    loadSettings(),
+    loadPromptTemplates(),
+    loadProviderStatus(),
+  ]);
   showView("library");
 }
 
 // Show/hide views
 function showView(view) {
   currentView = view;
-  document.querySelectorAll(".view").forEach(el => el.classList.remove("active"));
-  document.querySelectorAll(".nav-btn").forEach(el => el.classList.remove("active"));
+  document.querySelectorAll(".view").forEach((el) => el.classList.remove("active"));
+  document.querySelectorAll(".nav-btn").forEach((el) => el.classList.remove("active"));
 
   if (view === "detail") {
     document.querySelector("#detail-view").classList.add("active");
@@ -51,37 +59,49 @@ function showView(view) {
   }
 }
 
-// Load meetings from backend
+// --- Meetings ---------------------------------------------------------------
+
 async function loadMeetings() {
   try {
     setStatus("Loading meetings...");
-    const meetingIds = await invoke("list_meetings", { limit: 100, offset: 0 });
-    meetings = meetingIds;
+    meetings = await invoke("list_meetings", { limit: 100, offset: 0 });
     renderMeetings();
-    setStatus(`Loaded ${meetings.length} meetings`);
+    setStatus(`Loaded ${meetings.length} meeting(s)`);
   } catch (error) {
     setStatus(`Error loading meetings: ${error}`);
     console.error("Failed to load meetings:", error);
   }
 }
 
-// Render meeting list
+function formatDate(epochMillis) {
+  if (!epochMillis) return "Unknown";
+  return new Date(epochMillis).toLocaleString();
+}
+
 function renderMeetings() {
   if (meetings.length === 0) {
-    meetingListEl.innerHTML = '<p class="empty-state">No meetings yet. Import an audio file or create a new meeting.</p>';
+    meetingListEl.innerHTML =
+      '<p class="empty-state">No meetings yet. Import an audio file to get started.</p>';
     return;
   }
 
-  meetingListEl.innerHTML = meetings.map(id => `
-    <div class="meeting-item" data-id="${id}">
-      <div class="meeting-title">Meeting ${id.substring(0, 8)}...</div>
-      <div class="meeting-meta">ID: ${id}</div>
-      <button class="btn-small view-details-btn" data-id="${id}">View Details</button>
+  meetingListEl.innerHTML = meetings
+    .map((m) => {
+      const title = escapeHtml(m.title || `Meeting ${m.id.substring(0, 8)}`);
+      return `
+    <div class="meeting-item" data-id="${m.id}">
+      <div class="meeting-title">${title}</div>
+      <div class="meeting-meta">
+        <span class="badge">${escapeHtml(m.status)}</span>
+        ${formatDate(m.started_at)} &middot; ${escapeHtml(m.audio_format || "")}
+      </div>
+      <button class="btn-small view-details-btn" data-id="${m.id}">View Details</button>
     </div>
-  `).join("");
+  `;
+    })
+    .join("");
 
-  // Add click handlers
-  document.querySelectorAll(".meeting-item").forEach(el => {
+  document.querySelectorAll(".meeting-item").forEach((el) => {
     el.addEventListener("click", (e) => {
       if (!e.target.classList.contains("view-details-btn")) {
         selectMeeting(el.dataset.id);
@@ -89,7 +109,7 @@ function renderMeetings() {
     });
   });
 
-  document.querySelectorAll(".view-details-btn").forEach(btn => {
+  document.querySelectorAll(".view-details-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       viewMeetingDetails(btn.dataset.id);
@@ -97,71 +117,147 @@ function renderMeetings() {
   });
 }
 
-// Select a meeting
 function selectMeeting(id) {
-  document.querySelectorAll(".meeting-item").forEach(el => {
+  document.querySelectorAll(".meeting-item").forEach((el) => {
     el.classList.toggle("selected", el.dataset.id === id);
   });
   setStatus(`Selected meeting: ${id}`);
 }
 
-// View meeting details
 async function viewMeetingDetails(id) {
   currentMeetingId = id;
   showView("detail");
+  setStatus("Loading meeting details...");
 
+  let meeting;
   try {
-    setStatus("Loading meeting details...");
-    // In a real implementation, this would fetch full meeting data
-    meetingDetailEl.innerHTML = `
-      <div class="detail-header">
-        <h2>Meeting Details</h2>
-        <button id="back-to-library-btn" class="btn-secondary">Back to Library</button>
-      </div>
-      <div class="detail-content">
-        <div class="detail-section">
-          <h3>Meeting Information</h3>
-          <p><strong>ID:</strong> ${id}</p>
-          <p><strong>Status:</strong> Processing</p>
-          <p><strong>Created:</strong> ${new Date().toLocaleString()}</p>
-        </div>
-        <div class="detail-section">
-          <h3>Transcript</h3>
-          <p class="placeholder-text">Transcript will appear here after processing...</p>
-        </div>
-        <div class="detail-section">
-          <h3>Summary</h3>
-          <p class="placeholder-text">Summary will appear here after processing...</p>
-        </div>
-        <div class="detail-section">
-          <h3>Action Items</h3>
-          <p class="placeholder-text">Action items will appear here after processing...</p>
-        </div>
-        <div class="detail-section">
-          <h3>Decisions</h3>
-          <p class="placeholder-text">Decisions will appear here after processing...</p>
-        </div>
-      </div>
-    `;
-
-    // Re-attach back button listener
-    document.querySelector("#back-to-library-btn").addEventListener("click", () => showView("library"));
-    setStatus(`Viewing meeting: ${id}`);
+    meeting = await invoke("get_meeting", { id });
   } catch (error) {
-    setStatus(`Error loading details: ${error}`);
-    console.error("Failed to load meeting details:", error);
+    setStatus(`Error loading meeting: ${error}`);
+    return;
+  }
+  if (!meeting) {
+    meetingDetailEl.innerHTML = '<p class="placeholder-text">Meeting not found.</p>';
+    return;
+  }
+
+  meetingDetailEl.innerHTML = `
+    <div class="detail-header">
+      <h2>${escapeHtml(meeting.title || "Untitled meeting")}</h2>
+      <button id="back-to-library-btn" class="btn-secondary">Back to Library</button>
+    </div>
+    <div class="detail-content">
+      <div class="detail-section">
+        <h3>Meeting Information</h3>
+        <p><strong>Status:</strong> <span class="badge">${escapeHtml(meeting.status)}</span></p>
+        <p><strong>Started:</strong> ${formatDate(meeting.started_at)}</p>
+        <p><strong>Source:</strong> ${escapeHtml(meeting.audio_source)}</p>
+        <p><strong>Audio:</strong> ${escapeHtml(meeting.audio_format || "n/a")} (${meeting.audio_size_bytes} bytes)</p>
+        <div class="detail-actions">
+          <button id="transcribe-btn" class="btn-primary">Transcribe</button>
+          <button id="summarize-btn" class="btn-secondary">Summarize</button>
+        </div>
+      </div>
+      <div class="detail-section">
+        <h3>Transcript</h3>
+        <div id="transcript-content"><p class="placeholder-text">Loading...</p></div>
+      </div>
+      <div class="detail-section">
+        <h3>Summary</h3>
+        <div id="summary-content"><p class="placeholder-text">Loading...</p></div>
+      </div>
+    </div>
+  `;
+
+  document.querySelector("#back-to-library-btn").addEventListener("click", () => showView("library"));
+  document.querySelector("#transcribe-btn").addEventListener("click", transcribeCurrentMeeting);
+  document.querySelector("#summarize-btn").addEventListener("click", summarizeCurrentMeeting);
+
+  await Promise.all([loadTranscript(id), loadSummary(id)]);
+  setStatus(`Viewing meeting: ${meeting.title || id}`);
+}
+
+async function loadTranscript(meetingId) {
+  const el = document.querySelector("#transcript-content");
+  try {
+    const segments = await invoke("get_transcript_segments", { meetingId });
+    if (!segments || segments.length === 0) {
+      el.innerHTML = '<p class="placeholder-text">No transcript yet. Click Transcribe to generate one.</p>';
+      return;
+    }
+    el.innerHTML = segments
+      .map((s) => `<p class="segment"><span class="segment-time">${formatMs(s.start_ms)}</span> ${escapeHtml(s.text)}</p>`)
+      .join("");
+  } catch (error) {
+    el.innerHTML = `<p class="placeholder-text">Failed to load transcript: ${escapeHtml(String(error))}</p>`;
   }
 }
 
-// Import audio file
+async function loadSummary(meetingId) {
+  const el = document.querySelector("#summary-content");
+  try {
+    const summary = await invoke("get_summary", { meetingId });
+    if (!summary) {
+      el.innerHTML = '<p class="placeholder-text">No summary yet. Click Summarize to generate one.</p>';
+      return;
+    }
+    el.innerHTML = `<p>${escapeHtml(summary.content)}</p>
+      <p class="meeting-meta">Generated by: ${escapeHtml(summary.generation_mode)}</p>`;
+  } catch (error) {
+    el.innerHTML = `<p class="placeholder-text">Failed to load summary: ${escapeHtml(String(error))}</p>`;
+  }
+}
+
+async function transcribeCurrentMeeting() {
+  if (!currentMeetingId) return;
+  const btn = document.querySelector("#transcribe-btn");
+  btn.disabled = true;
+  setStatus("Transcribing meeting (this can take a while)...");
+  try {
+    const count = await invoke("transcribe_meeting", { meetingId: currentMeetingId });
+    setStatus(`Transcription complete: ${count} segment(s) stored`);
+    await Promise.all([loadTranscript(currentMeetingId), loadMeetingsQuiet()]);
+  } catch (error) {
+    setStatus(`Transcription failed: ${error}`);
+    console.error("Transcription failed:", error);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function summarizeCurrentMeeting() {
+  if (!currentMeetingId) return;
+  const btn = document.querySelector("#summarize-btn");
+  btn.disabled = true;
+  setStatus("Summarizing meeting...");
+  try {
+    await invoke("summarize_meeting", { meetingId: currentMeetingId });
+    setStatus("Summary generated");
+    await loadSummary(currentMeetingId);
+  } catch (error) {
+    setStatus(`Summarization failed: ${error}`);
+    console.error("Summarization failed:", error);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Refresh the in-memory list without disrupting the current view.
+async function loadMeetingsQuiet() {
+  try {
+    meetings = await invoke("list_meetings", { limit: 100, offset: 0 });
+  } catch (error) {
+    console.error("Failed to refresh meetings:", error);
+  }
+}
+
+// --- Import -----------------------------------------------------------------
+
 async function importAudioFile() {
   try {
-    const selected = await open({
+    const selected = await openDialog({
       multiple: false,
-      filters: [{
-        name: "Audio Files",
-        extensions: ["m4a", "wav", "mp3", "ogg", "webm", "flac"]
-      }]
+      filters: [{ name: "Audio Files", extensions: SUPPORTED_EXTENSIONS }],
     });
 
     if (!selected) {
@@ -170,52 +266,152 @@ async function importAudioFile() {
     }
 
     setStatus("Importing audio file...");
-    const destPath = await invoke("import_audio_file", { path: selected });
-    setStatus(`File imported to: ${destPath}`);
-
-    // Refresh meeting list
-    await loadMeetings();
+    const meetingId = await invoke("import_audio_file", { path: selected });
+    setStatus("File imported. Opening meeting details...");
+    await loadMeetingsQuiet();
+    viewMeetingDetails(meetingId);
   } catch (error) {
     setStatus(`Import failed: ${error}`);
     console.error("Failed to import file:", error);
   }
 }
 
-// Get supported formats
 async function loadSupportedFormats() {
   try {
     const formats = await invoke("get_supported_audio_formats");
-    document.querySelector("#supported-formats").textContent = formats.join(", ");
+    document.querySelector("#supported-formats").textContent = formats.join(", ").toUpperCase();
   } catch (error) {
     console.error("Failed to load formats:", error);
   }
 }
 
-// Save API keys
-async function saveApiKeys() {
+// --- Settings ---------------------------------------------------------------
+
+const API_KEY_FIELDS = [
+  { inputId: "openai-api-key", provider: "openai" },
+  { inputId: "anthropic-api-key", provider: "anthropic" },
+  { inputId: "deepgram-api-key", provider: "deepgram" },
+];
+
+async function loadSettings() {
   try {
-    setStatus("Saving API keys...");
-    // In a real implementation, this would save API keys via Tauri commands
-    setStatus("API keys saved successfully");
+    const [stt, llm] = await Promise.all([
+      invoke("get_config", { key: "stt_provider" }),
+      invoke("get_config", { key: "llm_provider" }),
+    ]);
+    if (stt) document.querySelector("#stt-provider").value = stt;
+    if (llm) document.querySelector("#llm-provider").value = llm;
+
+    // Show which providers already have a stored key.
+    for (const { inputId, provider } of API_KEY_FIELDS) {
+      const hasKey = await invoke("has_api_key", { provider });
+      if (hasKey) {
+        document.querySelector(`#${inputId}`).placeholder = "Stored (enter a new value to replace)";
+      }
+    }
   } catch (error) {
-    setStatus(`Error saving API keys: ${error}`);
-    console.error("Failed to save API keys:", error);
+    console.error("Failed to load settings:", error);
   }
 }
 
-// Create prompt template
+async function loadProviderStatus() {
+  try {
+    const [sttProviders, llmProviders] = await Promise.all([
+      invoke("list_stt_providers"),
+      invoke("list_llm_providers"),
+    ]);
+    const describe = (list) =>
+      list.map((p) => `${p.name}${p.available ? " ✓" : ""}`).join(", ");
+    const sttEl = document.querySelector("#stt-provider-status");
+    const llmEl = document.querySelector("#llm-provider-status");
+    if (sttEl) sttEl.textContent = `Ready: ${describe(sttProviders.filter((p) => p.available)) || "none (local stub active)"}`;
+    if (llmEl) llmEl.textContent = `Ready: ${describe(llmProviders.filter((p) => p.available)) || "none (rule-based fallback active)"}`;
+  } catch (error) {
+    console.error("Failed to load provider status:", error);
+  }
+}
+
+async function saveSettings() {
+  try {
+    setStatus("Saving settings...");
+
+    const sttProvider = document.querySelector("#stt-provider").value;
+    const llmProvider = document.querySelector("#llm-provider").value;
+    await invoke("set_config", { key: "stt_provider", value: sttProvider });
+    await invoke("set_config", { key: "llm_provider", value: llmProvider });
+
+    let savedKeys = 0;
+    for (const { inputId, provider } of API_KEY_FIELDS) {
+      const input = document.querySelector(`#${inputId}`);
+      const value = input.value.trim();
+      if (value) {
+        await invoke("save_api_key", { provider, apiKey: value });
+        input.value = "";
+        input.placeholder = "Stored (enter a new value to replace)";
+        savedKeys += 1;
+      }
+    }
+
+    setStatus(`Settings saved (providers updated, ${savedKeys} API key(s) stored)`);
+    await loadProviderStatus();
+  } catch (error) {
+    setStatus(`Error saving settings: ${error}`);
+    console.error("Failed to save settings:", error);
+  }
+}
+
+// --- Prompt templates ---------------------------------------------------------
+
+async function loadPromptTemplates() {
+  try {
+    const templates = await invoke("list_prompt_templates");
+    if (!templates || templates.length === 0) {
+      templateListEl.innerHTML = '<p class="placeholder-text">No templates available.</p>';
+      return;
+    }
+    templateListEl.innerHTML = templates
+      .map(
+        (t) => `
+      <div class="template-item">
+        <strong>${escapeHtml(t.name)}</strong>
+        <p class="meeting-meta">Variables: ${t.variables.map((v) => escapeHtml(v.name)).join(", ") || "none"}</p>
+      </div>`
+      )
+      .join("");
+  } catch (error) {
+    console.error("Failed to load templates:", error);
+  }
+}
+
 async function createPromptTemplate() {
+  const name = window.prompt("Template name:");
+  if (!name) return;
+  const content = window.prompt("Template content (use {{variable}} placeholders):");
+  if (!content) return;
   try {
-    setStatus("Creating prompt template...");
-    // In a real implementation, this would open a template editor dialog
-    setStatus("Template editor would open here");
+    await invoke("save_prompt_template", { name, content });
+    setStatus(`Template "${name}" saved`);
+    await loadPromptTemplates();
   } catch (error) {
-    setStatus(`Error creating template: ${error}`);
-    console.error("Failed to create template:", error);
+    setStatus(`Failed to save template: ${error}`);
   }
 }
 
-// Update status bar
+// --- Utilities ----------------------------------------------------------------
+
+function formatMs(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text == null ? "" : String(text);
+  return div.innerHTML;
+}
+
 function setStatus(message) {
   statusEl.textContent = message;
 }
