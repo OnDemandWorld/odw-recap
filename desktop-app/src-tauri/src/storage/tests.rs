@@ -298,4 +298,175 @@ mod tests {
         assert_eq!(templates[1].2, Some("standup".to_string()));
         assert!(templates[1].3);
     }
+
+    #[test]
+    fn test_action_items_crud() {
+        use crate::storage::types::ActionItem;
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::open_or_initialize(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+        let meeting = create_test_meeting();
+        storage.create_meeting(&meeting).unwrap();
+
+        // Create action items
+        let item1 = ActionItem {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            description: "Review the proposal".to_string(),
+            assignee: Some("Alice".to_string()),
+            deadline: Some("Next Friday".to_string()),
+            source_segment_id: None,
+            status: "pending".to_string(),
+            loop_task_id: None,
+            sync_status: SyncStatus::NotSynced,
+            created_at: 1719136800000,
+            updated_at: 1719136800000,
+        };
+        let item2 = ActionItem {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            description: "Send follow-up email".to_string(),
+            assignee: None,
+            deadline: None,
+            source_segment_id: None,
+            status: "pending".to_string(),
+            loop_task_id: None,
+            sync_status: SyncStatus::NotSynced,
+            created_at: 1719136800000,
+            updated_at: 1719136800000,
+        };
+
+        storage.save_action_item(&item1).unwrap();
+        storage.save_action_item(&item2).unwrap();
+
+        // List action items
+        let items = storage.list_action_items(meeting.id).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].description, "Review the proposal");
+        assert_eq!(items[0].assignee, Some("Alice".to_string()));
+        assert_eq!(items[1].description, "Send follow-up email");
+        assert_eq!(items[1].assignee, None);
+
+        // Update status
+        storage.update_action_item_status(item1.id, "done").unwrap();
+        let items = storage.list_action_items(meeting.id).unwrap();
+        let updated_item = items.iter().find(|i| i.id == item1.id).unwrap();
+        assert_eq!(updated_item.status, "done");
+
+        // Delete action item
+        storage.delete_action_item(item2.id).unwrap();
+        let items = storage.list_action_items(meeting.id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, item1.id);
+
+        // Delete non-existent item should error
+        assert!(storage.delete_action_item(item2.id).is_err());
+    }
+
+    #[test]
+    fn test_decisions_crud() {
+        use crate::storage::types::Decision;
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::open_or_initialize(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+        let meeting = create_test_meeting();
+        storage.create_meeting(&meeting).unwrap();
+
+        // Create decisions
+        let decision1 = Decision {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            description: "Approved the Q3 budget".to_string(),
+            context: Some("After reviewing the financial projections".to_string()),
+            participants: vec!["Bob".to_string(), "Charlie".to_string()],
+            source_segment_ids: vec![],
+            vault_entry_id: None,
+            sync_status: SyncStatus::NotSynced,
+            created_at: 1719136800000,
+        };
+        let decision2 = Decision {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            description: "Postponed the product launch".to_string(),
+            context: None,
+            participants: vec!["Alice".to_string()],
+            source_segment_ids: vec![],
+            vault_entry_id: None,
+            sync_status: SyncStatus::NotSynced,
+            created_at: 1719136800000,
+        };
+
+        storage.save_decision(&decision1).unwrap();
+        storage.save_decision(&decision2).unwrap();
+
+        // List decisions
+        let decisions = storage.list_decisions(meeting.id).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].description, "Approved the Q3 budget");
+        assert_eq!(
+            decisions[0].context,
+            Some("After reviewing the financial projections".to_string())
+        );
+        assert_eq!(decisions[0].participants.len(), 2);
+        assert_eq!(decisions[1].description, "Postponed the product launch");
+        assert_eq!(decisions[1].context, None);
+
+        // Delete decision
+        storage.delete_decision(decision1.id).unwrap();
+        let decisions = storage.list_decisions(meeting.id).unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].id, decision2.id);
+
+        // Delete non-existent decision should error
+        assert!(storage.delete_decision(decision1.id).is_err());
+    }
+
+    #[test]
+    fn test_action_items_isolated_by_meeting() {
+        use crate::storage::types::ActionItem;
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::open_or_initialize(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        let meeting1 = create_test_meeting();
+        let meeting2 = create_test_meeting();
+        storage.create_meeting(&meeting1).unwrap();
+        storage.create_meeting(&meeting2).unwrap();
+
+        let item1 = ActionItem {
+            id: Uuid::new_v4(),
+            meeting_id: meeting1.id,
+            description: "Task for meeting 1".to_string(),
+            assignee: None,
+            deadline: None,
+            source_segment_id: None,
+            status: "pending".to_string(),
+            loop_task_id: None,
+            sync_status: SyncStatus::NotSynced,
+            created_at: 1719136800000,
+            updated_at: 1719136800000,
+        };
+        let item2 = ActionItem {
+            id: Uuid::new_v4(),
+            meeting_id: meeting2.id,
+            description: "Task for meeting 2".to_string(),
+            assignee: None,
+            deadline: None,
+            source_segment_id: None,
+            status: "pending".to_string(),
+            loop_task_id: None,
+            sync_status: SyncStatus::NotSynced,
+            created_at: 1719136800000,
+            updated_at: 1719136800000,
+        };
+
+        storage.save_action_item(&item1).unwrap();
+        storage.save_action_item(&item2).unwrap();
+
+        // Each meeting should only see its own action items
+        let items1 = storage.list_action_items(meeting1.id).unwrap();
+        assert_eq!(items1.len(), 1);
+        assert_eq!(items1[0].description, "Task for meeting 1");
+
+        let items2 = storage.list_action_items(meeting2.id).unwrap();
+        assert_eq!(items2.len(), 1);
+        assert_eq!(items2[0].description, "Task for meeting 2");
+    }
 }

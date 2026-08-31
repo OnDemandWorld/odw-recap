@@ -16,6 +16,20 @@ fn parse_stored_uuid(raw: &str) -> Result<Uuid> {
     })
 }
 
+/// Parse a UUID inside a query_map closure, mapping to rusqlite::Error
+fn parse_stored_uuid_rusqlite(raw: &str) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid UUID '{}' in database: {}", raw, e),
+            )),
+        )
+    })
+}
+
 /// Parse an enum column losslessly: unknown values surface as errors instead
 /// of silently mapping to a default variant.
 fn parse_enum<T: TryFrom<String, Error = String>>(row: &rusqlite::Row, name: &str) -> rusqlite::Result<T> {
@@ -354,6 +368,135 @@ impl SqliteManager {
             }
             None => Ok(None),
         }
+    }
+
+    // --- Action Items ---
+
+    pub fn save_action_item(&self, item: &ActionItem) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO action_items
+             (id, meeting_id, description, assignee, deadline, source_segment_id, status, loop_task_id, sync_status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                item.id.to_string(),
+                item.meeting_id.to_string(),
+                item.description,
+                item.assignee,
+                item.deadline,
+                item.source_segment_id,
+                item.status,
+                item.loop_task_id,
+                item.sync_status.to_string(),
+                item.created_at,
+                item.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_action_items(&self, meeting_id: Uuid) -> Result<Vec<ActionItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, meeting_id, description, assignee, deadline, source_segment_id, status, loop_task_id, sync_status, created_at, updated_at
+             FROM action_items WHERE meeting_id = ?1 ORDER BY created_at",
+        )?;
+
+        let items = stmt.query_map(params![meeting_id.to_string()], |row| {
+            Ok(ActionItem {
+                id: parse_stored_uuid_rusqlite(&row.get::<_, String>(0)?)?,
+                meeting_id: parse_stored_uuid_rusqlite(&row.get::<_, String>(1)?)?,
+                description: row.get(2)?,
+                assignee: row.get(3)?,
+                deadline: row.get(4)?,
+                source_segment_id: row.get(5)?,
+                status: row.get(6)?,
+                loop_task_id: row.get(7)?,
+                sync_status: parse_enum(row, "sync_status")?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?;
+
+        items.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn update_action_item_status(&self, id: Uuid, status: &str) -> Result<()> {
+        let updated = self.conn.execute(
+            "UPDATE action_items SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, chrono::Utc::now().timestamp_millis(), id.to_string()],
+        )?;
+        if updated == 0 {
+            return Err(RecapError::Database(format!("Action item {} not found", id)));
+        }
+        Ok(())
+    }
+
+    pub fn delete_action_item(&self, id: Uuid) -> Result<()> {
+        let deleted = self.conn.execute(
+            "DELETE FROM action_items WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        if deleted == 0 {
+            return Err(RecapError::Database(format!("Action item {} not found", id)));
+        }
+        Ok(())
+    }
+
+    // --- Decisions ---
+
+    pub fn save_decision(&self, decision: &Decision) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO decisions
+             (id, meeting_id, description, context, participants, source_segment_ids, vault_entry_id, sync_status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                decision.id.to_string(),
+                decision.meeting_id.to_string(),
+                decision.description,
+                decision.context,
+                serde_json::to_string(&decision.participants)?,
+                serde_json::to_string(&decision.source_segment_ids)?,
+                decision.vault_entry_id,
+                decision.sync_status.to_string(),
+                decision.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_decisions(&self, meeting_id: Uuid) -> Result<Vec<Decision>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, meeting_id, description, context, participants, source_segment_ids, vault_entry_id, sync_status, created_at
+             FROM decisions WHERE meeting_id = ?1 ORDER BY created_at",
+        )?;
+
+        let decisions = stmt.query_map(params![meeting_id.to_string()], |row| {
+            let participants_json: String = row.get(4)?;
+            let segment_ids_json: String = row.get(5)?;
+            Ok(Decision {
+                id: parse_stored_uuid_rusqlite(&row.get::<_, String>(0)?)?,
+                meeting_id: parse_stored_uuid_rusqlite(&row.get::<_, String>(1)?)?,
+                description: row.get(2)?,
+                context: row.get(3)?,
+                participants: serde_json::from_str(&participants_json).unwrap_or_default(),
+                source_segment_ids: serde_json::from_str(&segment_ids_json).unwrap_or_default(),
+                vault_entry_id: row.get(6)?,
+                sync_status: parse_enum(row, "sync_status")?,
+                created_at: row.get(8)?,
+            })
+        })?;
+
+        decisions.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn delete_decision(&self, id: Uuid) -> Result<()> {
+        let deleted = self.conn.execute(
+            "DELETE FROM decisions WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        if deleted == 0 {
+            return Err(RecapError::Database(format!("Decision {} not found", id)));
+        }
+        Ok(())
     }
 
     pub fn save_api_key(&self, provider: &str, key_encrypted: &str) -> Result<()> {

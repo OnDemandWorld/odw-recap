@@ -1,3 +1,4 @@
+pub mod extract_structured;
 pub mod llm_provider;
 pub mod llm_router;
 pub mod providers;

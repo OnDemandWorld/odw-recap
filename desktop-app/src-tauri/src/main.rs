@@ -646,6 +646,118 @@ async fn summarize_meeting(meeting_id: String, state: State<'_, AppState>) -> Re
     Ok(result.summary)
 }
 
+#[tauri::command]
+async fn extract_action_items_and_decisions(
+    meeting_id: String,
+    state: State<'_, AppState>,
+) -> Result<(Vec<ActionItem>, Vec<Decision>)> {
+    use crate::summarization::{extract_structured::extract_structured_output, LLMRouter};
+
+    let (meeting_id, provider_name, credentials) = {
+        let guard = acquire_vault(&state.vault)?;
+        let storage = storage_of(&guard)?;
+        let config = config_of(&guard)?;
+        let meeting_id = uuid::Uuid::parse_str(&meeting_id)
+            .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
+        let _meeting = storage
+            .get_meeting(meeting_id)?
+            .ok_or_else(|| RecapError::Storage("Meeting not found".to_string()))?;
+        let provider_name = config.llm_provider()?;
+        let credentials = collect_credentials(storage, config, &state.data_dir)?;
+        (meeting_id, provider_name, credentials)
+    };
+
+    let segments = {
+        let guard = acquire_vault(&state.vault)?;
+        storage_of(&guard)?.get_transcript_segments(meeting_id)?
+    };
+    if segments.is_empty() {
+        return Err(RecapError::Summarization(
+            "No transcript found for this meeting. Run transcription first.".to_string(),
+        ));
+    }
+    let transcript: Vec<String> = segments.iter().map(|s| s.text.clone()).collect();
+    let text = transcript.join("\n");
+
+    let router = LLMRouter::with_all_providers(provider_name.clone(), &credentials);
+    let provider_available = match router.get_provider(&provider_name) {
+        Some(provider) => provider.is_available().await.unwrap_or(false),
+        None => false,
+    };
+
+    if !provider_available {
+        return Err(RecapError::Summarization(
+            "No LLM provider available. Configure an LLM provider in settings to extract structured data."
+                .to_string(),
+        ));
+    }
+
+    // Extract structured data using the LLM
+    let (action_items, decisions) = extract_structured_output(
+        &router,
+        &text,
+        meeting_id,
+        Some(provider_name),
+    )
+    .await?;
+
+    // Save to storage
+    let guard = acquire_vault(&state.vault)?;
+    let storage = storage_of(&guard)?;
+    for item in &action_items {
+        storage.save_action_item(item)?;
+    }
+    for decision in &decisions {
+        storage.save_decision(decision)?;
+    }
+
+    Ok((action_items, decisions))
+}
+
+#[tauri::command]
+fn list_action_items(meeting_id: String, state: State<AppState>) -> Result<Vec<ActionItem>> {
+    let meeting_id = uuid::Uuid::parse_str(&meeting_id)
+        .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.list_action_items(meeting_id)
+}
+
+#[tauri::command]
+fn update_action_item_status(
+    id: String,
+    status: String,
+    state: State<AppState>,
+) -> Result<()> {
+    let id = uuid::Uuid::parse_str(&id)
+        .map_err(|e| RecapError::Storage(format!("Invalid action item id: {}", e)))?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.update_action_item_status(id, &status)
+}
+
+#[tauri::command]
+fn delete_action_item(id: String, state: State<AppState>) -> Result<()> {
+    let id = uuid::Uuid::parse_str(&id)
+        .map_err(|e| RecapError::Storage(format!("Invalid action item id: {}", e)))?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.delete_action_item(id)
+}
+
+#[tauri::command]
+fn list_decisions(meeting_id: String, state: State<AppState>) -> Result<Vec<Decision>> {
+    let meeting_id = uuid::Uuid::parse_str(&meeting_id)
+        .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.list_decisions(meeting_id)
+}
+
+#[tauri::command]
+fn delete_decision(id: String, state: State<AppState>) -> Result<()> {
+    let id = uuid::Uuid::parse_str(&id)
+        .map_err(|e| RecapError::Storage(format!("Invalid decision id: {}", e)))?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.delete_decision(id)
+}
+
 fn main() {
     let data_dir = resolve_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -705,6 +817,12 @@ fn main() {
             search_transcripts,
             transcribe_meeting,
             summarize_meeting,
+            extract_action_items_and_decisions,
+            list_action_items,
+            update_action_item_status,
+            delete_action_item,
+            list_decisions,
+            delete_decision,
             list_prompt_templates,
             save_prompt_template,
             list_stt_providers,

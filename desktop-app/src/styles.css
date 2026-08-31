@@ -474,3 +474,48 @@ body {
   font-size: 12px;
   margin-top: 14px;
 }
+
+/* --- Action Items & Decisions ------------------------------------------- */
+
+.action-item, .decision {
+  border: 1px solid #e3e6ea;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: #fff;
+}
+
+.action-item-header, .decision-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.action-item-checkbox {
+  margin-top: 4px;
+  cursor: pointer;
+}
+
+.action-item-description, .decision-description {
+  flex: 1;
+  line-height: 1.5;
+}
+
+.action-item-description.done {
+  text-decoration: line-through;
+  color: #6c757d;
+}
+
+.action-item-meta, .decision-context, .decision-participants {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #6c757d;
+}
+
+.action-item-meta span {
+  margin-right: 16px;
+}
+
+.delete-action-item-btn, .delete-decision-btn {
+  flex-shrink: 0;
+}

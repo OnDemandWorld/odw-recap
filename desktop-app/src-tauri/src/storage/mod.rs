@@ -265,6 +265,36 @@ impl StorageManager {
         self.db.get_summary(meeting_id)
     }
 
+    // Action item operations
+    pub fn save_action_item(&self, item: &ActionItem) -> Result<()> {
+        self.db.save_action_item(item)
+    }
+
+    pub fn list_action_items(&self, meeting_id: Uuid) -> Result<Vec<ActionItem>> {
+        self.db.list_action_items(meeting_id)
+    }
+
+    pub fn update_action_item_status(&self, id: Uuid, status: &str) -> Result<()> {
+        self.db.update_action_item_status(id, status)
+    }
+
+    pub fn delete_action_item(&self, id: Uuid) -> Result<()> {
+        self.db.delete_action_item(id)
+    }
+
+    // Decision operations
+    pub fn save_decision(&self, decision: &Decision) -> Result<()> {
+        self.db.save_decision(decision)
+    }
+
+    pub fn list_decisions(&self, meeting_id: Uuid) -> Result<Vec<Decision>> {
+        self.db.list_decisions(meeting_id)
+    }
+
+    pub fn delete_decision(&self, id: Uuid) -> Result<()> {
+        self.db.delete_decision(id)
+    }
+
     // API key operations
     pub fn save_api_key(&self, provider: &str, api_key: &str) -> Result<()> {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
