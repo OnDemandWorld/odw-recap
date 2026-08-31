@@ -81,8 +81,10 @@ async function refreshVaultGate() {
     loadSettings(),
     loadPromptTemplates(),
     loadProviderStatus(),
+    loadWhisperModels(),
   ]);
   showView("library");
+  bindWhisperDownloadHandler();
 }
 
 function showVaultOverlay(mode) {
@@ -431,6 +433,89 @@ async function loadSettings() {
   } catch (error) {
     console.error("Failed to load settings:", error);
   }
+}
+
+// --- Whisper model management -----------------------------------------------
+
+async function loadWhisperModels() {
+  try {
+    const models = await invoke("list_whisper_models");
+    const select = document.querySelector("#whisper-model");
+    const savedModel = await invoke("get_config", { key: "whisper_model" });
+    select.innerHTML = models
+      .map((m) => {
+        const label = `${m.name}${m.installed ? " (installed)" : ""} — ${m.description}`;
+        return `<option value="${escapeHtml(m.name)}">${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    if (savedModel && models.some((m) => m.name === savedModel)) {
+      select.value = savedModel;
+    }
+    select.addEventListener("change", async () => {
+      await invoke("set_config", { key: "whisper_model", value: select.value });
+      updateWhisperStatus(models);
+    });
+    updateWhisperStatus(models);
+  } catch (error) {
+    console.error("Failed to load whisper models:", error);
+  }
+}
+
+function updateWhisperStatus(models) {
+  const status = document.querySelector("#whisper-model-status");
+  const selected = document.querySelector("#whisper-model").value;
+  const current = models.find((m) => m.name === selected);
+  if (!current || !status) return;
+  status.textContent = current.installed
+    ? `✓ ${current.name} ready`
+    : `${current.name} not downloaded (~${Math.round(current.size_bytes / 1_000_000)} MB)`;
+}
+
+function bindWhisperDownloadHandler() {
+  const btn = document.querySelector("#download-whisper-model-btn");
+  const progressBar = document.querySelector("#whisper-download-progress");
+  const status = document.querySelector("#whisper-model-status");
+  if (!btn || !progressBar || !status) return;
+
+  const { event } = window.__TAURI__;
+
+  event.listen("whisper-download-progress", (e) => {
+    const payload = e.payload;
+    if (!payload) return;
+    const { downloaded, total, done } = payload;
+    if (done) {
+      progressBar.style.display = "none";
+      status.textContent = "✓ Download complete";
+      btn.disabled = false;
+      btn.textContent = "Download Model";
+      loadWhisperModels();
+      return;
+    }
+    if (total > 0) {
+      const percent = Math.min(100, Math.round((downloaded / total) * 100));
+      progressBar.value = percent;
+      progressBar.style.display = "block";
+      status.textContent = `Downloading... ${percent}% (${Math.round(downloaded / 1_000_000)} MB / ${Math.round(total / 1_000_000)} MB)`;
+    }
+  });
+
+  btn.addEventListener("click", async () => {
+    const name = document.querySelector("#whisper-model").value;
+    if (!name) return;
+    btn.disabled = true;
+    btn.textContent = "Downloading...";
+    progressBar.value = 0;
+    progressBar.style.display = "block";
+    status.textContent = "Starting download...";
+    try {
+      await invoke("download_whisper_model", { name });
+    } catch (error) {
+      status.textContent = `Download failed: ${error}`;
+      btn.disabled = false;
+      btn.textContent = "Download Model";
+      progressBar.style.display = "none";
+    }
+  });
 }
 
 async function loadProviderStatus() {

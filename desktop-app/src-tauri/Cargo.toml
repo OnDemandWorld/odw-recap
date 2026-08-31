@@ -39,6 +39,8 @@ reqwest = { version = "0.11", features = ["json", "multipart"] }
 
 # Encoding
 base64 = "0.21"
+whisper-rs = "0.16.0"
+symphonia = { version = "0.5", features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 
 [dev-dependencies]
 tempfile = "3.8"

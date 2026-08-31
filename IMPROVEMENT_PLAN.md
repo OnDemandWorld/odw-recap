@@ -6,10 +6,9 @@
 > ## Phase status
 > - **Phase 1 (2026-09-01):** full review & refactor — see section 2. ✅
 > - **Phase 2 (2026-09-01):** the P0 sprint — **P0-1 vault unlock flow, P0-2
->   team-server auth hardening, P0-4 safe passphrase change, and P0-5 lossless
->   enum parsing are complete** (details in section 2.5). Remaining P0 item:
->   **P0-3 real on-device transcription (whisper.cpp)** — deliberately its own
->   dedicated effort.
+>   team-server auth hardening, P0-3 real on-device transcription
+>   (whisper.cpp), P0-4 safe passphrase change, and P0-5 lossless enum parsing
+>   are all complete** (details in section 2.5). All P0 items are done.
 
 ---
 
@@ -106,7 +105,7 @@ template management. Test coverage grew from **7 → 16 Rust tests** and
 
 | Check | Before | After Phase 1 | After Phase 2 |
 |-------|--------|-------|-------|
-| Rust tests | 7 passing | 16 passing | **23 passing** |
+| Rust tests | 7 passing | 16 passing | **29 passing** |
 | Go tests | 3 passing | 9 passing | **15 functions / 17 cases passing** |
 | Rust warnings (project code) | 150 | 0 | **0** |
 | `cargo build` / `go build` | OK | OK | OK |
@@ -148,6 +147,24 @@ template management. Test coverage grew from **7 → 16 Rust tests** and
   the new key inside a single SQLite transaction; the in-memory master key is
   swapped only after commit. A failure leaves all data readable with the old
   passphrase. Covered by tests.
+
+**P0-3 Real on-device transcription (whisper.cpp)**
+- `whisper_local` provider is no longer a stub. It calls whisper.cpp through
+  `whisper-rs`, loaded lazily and cached process-wide. Transcription runs on a
+  blocking thread (`spawn_blocking`) so the async runtime stays responsive.
+- Audio decode pipeline (via `symphonia`) handles WAV/MP3/FLAC/OGG/M4A/AAC,
+  mixes down to mono, and resamples linearly to 16 kHz — the format
+  whisper.cpp requires. WebM/Opus gives a clear error (needs ffmpeg).
+- Model manager: registry of tiny → large-v3 + large-v3-turbo, path resolution
+  under `<data_dir>/models/`, resumable HTTP downloads with progress events.
+- Default meeting language is now `"auto"`, enabling whisper.cpp's
+  auto-detection per transcription. OpenAI Whisper API treats `"auto"` as
+  "let the API detect" too.
+- UI: Settings now has a "Local Whisper Model" group with dropdown, download
+  button, progress bar listening to `whisper-download-progress` events, and
+  status text showing installed state and size.
+- Tests cover resampler correctness, WAV decode + resample round-trip, model
+  path resolution and installed-status scanning.
 
 **P0-5 Lossless enum parsing**
 - `MeetingStatus`/`SyncStatus`/`AudioSource` now implement `TryFrom<String>`;
@@ -203,7 +220,7 @@ product loop, **P2** = scale & polish, **P3** = nice-to-have.
 - **Accept:** server refuses to start without a secret; revoked tokens are
   rejected within one request; brute-force login attempts are throttled.
 
-#### P0-3. Real on-device transcription (whisper.cpp)
+#### P0-3. Real on-device transcription (whisper.cpp) ✅ DONE (Phase 2)
 - **Why:** "sovereign, on-device" is the product thesis; today the default
   provider returns placeholder text.
 - **What:** integrate `whisper-rs` (FFI to whisper.cpp); model download manager

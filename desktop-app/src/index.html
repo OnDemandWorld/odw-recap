@@ -113,6 +113,25 @@
             </div>
 
             <div class="settings-group">
+              <h3>Local Whisper Model</h3>
+              <div class="setting-item">
+                <label>Model</label>
+                <select id="whisper-model"></select>
+              </div>
+              <div class="setting-item">
+                <button id="download-whisper-model-btn" class="btn-secondary">Download Model</button>
+                <span id="whisper-model-status" class="meeting-meta"></span>
+              </div>
+              <div class="setting-item">
+                <progress id="whisper-download-progress" max="100" value="0" style="width:100%; display:none"></progress>
+              </div>
+              <p class="meeting-meta" style="font-size:11px; margin-top:-4px;">
+                Models run locally on your device. Larger models are more accurate but need more memory.
+                Downloads resume if interrupted.
+              </p>
+            </div>
+
+            <div class="settings-group">
               <h3>STT Provider</h3>
               <div class="setting-item">
                 <label>Default Provider</label>

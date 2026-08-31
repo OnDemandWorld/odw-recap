@@ -84,10 +84,10 @@ impl STTProvider for OpenAIWhisperProvider {
             .text("model", config.model.unwrap_or_else(|| "whisper-1".to_string()))
             .text("response_format", "verbose_json".to_string());
 
-        let form = if let Some(lang) = &config.language {
-            form.text("language", lang.clone())
-        } else {
-            form
+        // "auto" means let the API detect the language (omit the field).
+        let form = match &config.language {
+            Some(lang) if !lang.is_empty() && lang != "auto" => form.text("language", lang.clone()),
+            _ => form,
         };
 
         // Make API request

@@ -1,6 +1,8 @@
+pub mod audio_decode;
+pub mod providers;
 pub mod stt_provider;
 pub mod stt_router;
-pub mod providers;
+pub mod whisper_models;
 
 use crate::error::Result;
 use std::path::Path;

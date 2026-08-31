@@ -123,6 +123,10 @@
       tokens, rotating revocable refresh tokens (stored as SHA-256 hashes in
       Redis), `/auth/refresh` + `/auth/logout`, per-request user/role
       re-validation, per-IP rate limiting on auth endpoints, audit log writes
+- [x] **Real on-device transcription (whisper.cpp)**: `whisper-rs` provider,
+      model registry with resumable downloads + progress events, audio decode
+      pipeline (symphonia: WAV/MP3/FLAC/OGG/M4A/AAC → 16 kHz mono), cached
+      context, language auto-detection, settings UI for model selection
 - [x] **Lossless enum parsing**: `TryFrom` for meeting/sync/audio-source enums;
       unknown DB values error instead of silently changing state
 
@@ -132,7 +136,7 @@
 
 | Component | Tests | Status |
 |-----------|-------|--------|
-| Rust desktop backend | 23 | ✅ Passing |
+| Rust desktop backend | 29 | ✅ Passing |
 | Go team server | 15 functions / 17 cases | ✅ Passing |
 | Frontend (jest) | scaffolds excluded (`--passWithNoTests`) | ✅ Exits clean |
 | Desktop build | — | ✅ Compiles |
@@ -207,7 +211,7 @@ go test ./...
 ## Known Blockers & Limitations
 
 1. **Tauri 2.x upgrade deferred** due to scaffolding tooling availability; CSP is `null` until the migration.
-2. **Stub providers** (AssemblyAI, AWS Transcribe, Azure Speech, Google STT, Google Gemini, AWS Bedrock, Azure OpenAI, Llama.cpp, Whisper.cpp) require real API/FFI integration before production use. The OpenAI, Anthropic, Deepgram, and Ollama providers are real.
+2. **Stub providers** (AssemblyAI, AWS Transcribe, Azure Speech, Google STT, Google Gemini, AWS Bedrock, Azure OpenAI, Llama.cpp) require real API/FFI integration before production use. The OpenAI, Anthropic, Deepgram, Ollama, and **Whisper.cpp (local)** providers are real.
 3. **Audio capture** is implemented as a stub structure; real I/O requires `cpal` and platform-specific loopback devices. File import, watch folder, and HTTP upload (localhost-only) work.
 4. **Local encryption** now uses a real unlock flow (first-run setup + unlock screen, sentinel verification, safe re-encrypting passphrase change). Remaining: optional OS-keychain auto-unlock and auto-lock timeout (IMPROVEMENT_PLAN.md P1+).
 5. **Team server**: auth is hardened (fail-closed secret, refresh rotation, rate limiting, audit writes), but `sync_queue` still has no consumer worker (IMPROVEMENT_PLAN.md P1-1).

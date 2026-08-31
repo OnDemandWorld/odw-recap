@@ -20,7 +20,8 @@ impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
             provider: None,
-            language: Some("en".to_string()),
+            // "auto" lets the provider detect the language.
+            language: Some("auto".to_string()),
             model: None,
             detect_speakers: false,
             timestamps: true,

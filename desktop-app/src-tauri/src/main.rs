@@ -199,7 +199,7 @@ fn create_meeting(title: String, state: State<AppState>) -> Result<String> {
         meeting_type: Some("team_meeting".to_string()),
         location: None,
         participants: Vec::new(),
-        language: "en".to_string(),
+        language: "auto".to_string(),
         topic: None,
         audio_source: AudioSource::SystemCapture,
         stt_provider: "whisper_local".to_string(),
@@ -291,7 +291,7 @@ fn import_audio_file(path: String, state: State<AppState>) -> Result<String> {
         meeting_type: None,
         location: None,
         participants: Vec::new(),
-        language: "en".to_string(),
+        language: "auto".to_string(),
         topic: None,
         audio_source: AudioSource::FileImport,
         stt_provider: String::new(),
@@ -373,6 +373,7 @@ const CONFIG_CREDENTIAL_KEYS: &[&str] = &[
 fn collect_credentials(
     storage: &StorageManager,
     config: &ConfigManager,
+    data_dir: &Path,
 ) -> Result<std::collections::HashMap<String, String>> {
     let mut credentials = std::collections::HashMap::new();
     for provider in API_KEY_PROVIDERS {
@@ -385,6 +386,19 @@ fn collect_credentials(
             credentials.insert(key.to_string(), value);
         }
     }
+
+    // Resolve the local whisper model to a concrete file path from the
+    // configured model name.
+    let model_name = config
+        .get_string("whisper_model")?
+        .unwrap_or_else(|| transcription::whisper_models::DEFAULT_MODEL.to_string());
+    credentials.insert(
+        "whisper_model_path".to_string(),
+        transcription::whisper_models::model_file(data_dir, &model_name)
+            .to_string_lossy()
+            .to_string(),
+    );
+
     Ok(credentials)
 }
 
@@ -394,7 +408,63 @@ fn load_credentials(state: &State<AppState>) -> Result<std::collections::HashMap
     let guard = acquire_vault(&state.vault)?;
     let storage = storage_of(&guard)?;
     let config = config_of(&guard)?;
-    collect_credentials(storage, config)
+    collect_credentials(storage, config, &state.data_dir)
+}
+
+// --- Whisper model management -----------------------------------------------
+
+/// Progress payload emitted while a whisper model downloads.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WhisperDownloadProgress {
+    pub model: String,
+    pub downloaded: u64,
+    pub total: u64,
+    pub done: bool,
+}
+
+#[tauri::command]
+fn list_whisper_models(state: State<AppState>) -> Vec<transcription::whisper_models::WhisperModelInfo> {
+    transcription::whisper_models::list_models(&state.data_dir)
+}
+
+/// Download a whisper model with resume support. Emits
+/// `whisper-download-progress` events; the final event has `done: true`.
+#[tauri::command]
+async fn download_whisper_model(
+    name: String,
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    let data_dir = state.data_dir.clone();
+    let model_for_events = name.clone();
+    let win = window.clone();
+
+    transcription::whisper_models::download_model(&data_dir, &name, move |downloaded, total| {
+        let _ = win.emit(
+            "whisper-download-progress",
+            WhisperDownloadProgress {
+                model: model_for_events.clone(),
+                downloaded,
+                total,
+                done: false,
+            },
+        );
+    })
+    .await?;
+
+    window
+        .emit(
+            "whisper-download-progress",
+            WhisperDownloadProgress {
+                model: name.clone(),
+                downloaded: 0,
+                total: 0,
+                done: true,
+            },
+        )
+        .map_err(|e| RecapError::Transcription(format!("Failed to emit progress: {}", e)))?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -469,7 +539,7 @@ async fn transcribe_meeting(meeting_id: String, state: State<'_, AppState>) -> R
             .get_meeting(meeting_id)?
             .ok_or_else(|| RecapError::Storage("Meeting not found".to_string()))?;
         let provider_name = config.stt_provider()?;
-        let credentials = collect_credentials(storage, config)?;
+        let credentials = collect_credentials(storage, config, &state.data_dir)?;
         (meeting, provider_name, credentials)
     };
 
@@ -526,7 +596,7 @@ async fn summarize_meeting(meeting_id: String, state: State<'_, AppState>) -> Re
             .get_meeting(meeting_id)?
             .ok_or_else(|| RecapError::Storage("Meeting not found".to_string()))?;
         let provider_name = config.llm_provider()?;
-        let credentials = collect_credentials(storage, config)?;
+        let credentials = collect_credentials(storage, config, &state.data_dir)?;
         (meeting_id, provider_name, credentials)
     };
 
@@ -638,7 +708,9 @@ fn main() {
             list_prompt_templates,
             save_prompt_template,
             list_stt_providers,
-            list_llm_providers
+            list_llm_providers,
+            list_whisper_models,
+            download_whisper_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
