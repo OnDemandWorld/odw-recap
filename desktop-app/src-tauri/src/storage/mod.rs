@@ -20,6 +20,17 @@ use uuid::Uuid;
 const SALT_FILE: &str = "recap.salt";
 const SALT_LEN: usize = 32;
 
+/// Configuration key holding the encrypted vault sentinel. Decrypting it with
+/// the current master key verifies the passphrase; a decryption failure means
+/// the wrong passphrase was supplied.
+const VAULT_CHECK_KEY: &str = "vault_check";
+const VAULT_SENTINEL: &[u8] = b"recap-vault-sentinel-v1";
+
+/// Returns true once a vault has been created in `data_dir` (salt exists).
+pub fn vault_initialized(data_dir: &Path) -> bool {
+    data_dir.join(SALT_FILE).exists()
+}
+
 pub struct StorageManager {
     db: SqliteManager,
     file_store: FileStore,
@@ -31,11 +42,41 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
-    /// Open storage, loading the persisted salt or creating it on first run.
-    pub fn new(data_dir: PathBuf, passphrase: &str) -> Result<Self> {
+    /// Create a brand-new vault. Fails if one already exists in `data_dir`.
+    pub fn initialize(data_dir: PathBuf, passphrase: &str) -> Result<Self> {
+        if vault_initialized(&data_dir) {
+            return Err(RecapError::Vault(
+                "Vault is already initialized".to_string(),
+            ));
+        }
+
         std::fs::create_dir_all(&data_dir)?;
-        let salt = Self::load_or_create_salt(&data_dir)?;
-        Self::with_salt(data_dir, passphrase, salt)
+        let salt = EncryptionManager::generate_salt();
+        Self::write_private_file(&data_dir.join(SALT_FILE), &salt)?;
+
+        let manager = Self::with_salt(data_dir, passphrase, salt)?;
+        manager.write_sentinel()?;
+        Ok(manager)
+    }
+
+    /// Open an existing vault. Fails if the vault was never initialized or
+    /// the passphrase does not match.
+    pub fn open(data_dir: PathBuf, passphrase: &str) -> Result<Self> {
+        let salt = Self::load_salt(&data_dir)?;
+        let manager = Self::with_salt(data_dir, passphrase, salt)?;
+        manager.verify_or_adopt_sentinel()?;
+        Ok(manager)
+    }
+
+    /// Convenience constructor (tests, automation, future CLI tooling):
+    /// initialize the vault on first use, otherwise open it.
+    #[allow(dead_code)]
+    pub fn open_or_initialize(data_dir: PathBuf, passphrase: &str) -> Result<Self> {
+        if vault_initialized(&data_dir) {
+            Self::open(data_dir, passphrase)
+        } else {
+            Self::initialize(data_dir, passphrase)
+        }
     }
 
     pub fn with_salt(data_dir: PathBuf, passphrase: &str, salt: [u8; 32]) -> Result<Self> {
@@ -56,26 +97,25 @@ impl StorageManager {
         })
     }
 
-    /// Load the salt from disk, or generate and persist it on first run.
-    fn load_or_create_salt(data_dir: &Path) -> Result<[u8; 32]> {
+    /// Load the persisted salt; an error means the vault is not initialized.
+    fn load_salt(data_dir: &Path) -> Result<[u8; 32]> {
         let salt_path = data_dir.join(SALT_FILE);
-        if salt_path.exists() {
-            let bytes = std::fs::read(&salt_path)?;
-            if bytes.len() != SALT_LEN {
-                return Err(RecapError::Encryption(format!(
-                    "Corrupt salt file (expected {} bytes, found {}): {}",
-                    SALT_LEN,
-                    bytes.len(),
-                    salt_path.display()
-                )));
-            }
-            let mut salt = [0u8; SALT_LEN];
-            salt.copy_from_slice(&bytes);
-            return Ok(salt);
+        if !salt_path.exists() {
+            return Err(RecapError::Vault(
+                "Vault is not initialized on this device".to_string(),
+            ));
         }
-
-        let salt = EncryptionManager::generate_salt();
-        Self::write_private_file(&salt_path, &salt)?;
+        let bytes = std::fs::read(&salt_path)?;
+        if bytes.len() != SALT_LEN {
+            return Err(RecapError::Encryption(format!(
+                "Corrupt salt file (expected {} bytes, found {}): {}",
+                SALT_LEN,
+                bytes.len(),
+                salt_path.display()
+            )));
+        }
+        let mut salt = [0u8; SALT_LEN];
+        salt.copy_from_slice(&bytes);
         Ok(salt)
     }
 
@@ -99,18 +139,72 @@ impl StorageManager {
         Ok(())
     }
 
-    /// Change the passphrase.
-    ///
-    /// Currently unimplemented on purpose: swapping the key without
-    /// re-encrypting existing data would silently make encrypted API keys and
-    /// files unreadable. A correct implementation must re-encrypt every
-    /// encrypted artifact (api_keys table, encrypted files) atomically.
-    #[allow(dead_code)]
-    pub fn change_passphrase(&self, _new_passphrase: &str) -> Result<()> {
-        Err(RecapError::Encryption(
-            "Passphrase change is not implemented yet; it would need to re-encrypt all stored data"
-                .to_string(),
-        ))
+    /// Encrypt the sentinel with the current master key and store it.
+    fn write_sentinel(&self) -> Result<()> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let encrypted = self.encryption.encrypt(VAULT_SENTINEL)?;
+        self.db
+            .set_config_value(VAULT_CHECK_KEY, &STANDARD.encode(&encrypted))
+    }
+
+    /// Verify the passphrase against the stored sentinel. If no sentinel
+    /// exists yet (database created before the vault flow was introduced),
+    /// adopt the current passphrase by writing one.
+    fn verify_or_adopt_sentinel(&self) -> Result<()> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        match self.db.get_config_value(VAULT_CHECK_KEY)? {
+            Some(b64) => {
+                let encrypted = STANDARD.decode(&b64).map_err(|e| {
+                    RecapError::Encryption(format!("Corrupt vault sentinel: {}", e))
+                })?;
+                let decrypted = self.encryption.decrypt(&encrypted).map_err(|_| {
+                    RecapError::Vault("Wrong passphrase".to_string())
+                })?;
+                if decrypted != VAULT_SENTINEL {
+                    return Err(RecapError::Vault("Wrong passphrase".to_string()));
+                }
+                Ok(())
+            }
+            None => self.write_sentinel(),
+        }
+    }
+
+    /// Change the passphrase safely: every encrypted artifact (all API keys
+    /// and the vault sentinel) is re-encrypted with the new key inside a
+    /// single database transaction. The in-memory master key is swapped only
+    /// after the transaction commits, so a failure leaves all data readable
+    /// with the old passphrase.
+    pub fn change_passphrase(&self, new_passphrase: &str) -> Result<()> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        if new_passphrase.len() < 8 {
+            return Err(RecapError::Vault(
+                "New passphrase must be at least 8 characters".to_string(),
+            ));
+        }
+
+        let new_key = self.encryption.derive_key(new_passphrase)?;
+
+        // Re-encrypt every stored API key: old key decrypts, new key encrypts.
+        let mut updates = Vec::new();
+        for (provider, encrypted_b64) in self.db.list_api_keys_encrypted()? {
+            let encrypted = STANDARD.decode(&encrypted_b64).map_err(|e| {
+                RecapError::Encryption(format!("Corrupt API key entry: {}", e))
+            })?;
+            let plaintext = self.encryption.decrypt(&encrypted)?;
+            let reencrypted = EncryptionManager::encrypt_with_key(&new_key, &plaintext)?;
+            updates.push((provider, STANDARD.encode(&reencrypted)));
+        }
+
+        // Sentinel under the new key, committed atomically with the keys.
+        let new_sentinel = STANDARD.encode(
+            &EncryptionManager::encrypt_with_key(&new_key, VAULT_SENTINEL)?,
+        );
+        self.db.apply_reencryption(&updates, &new_sentinel)?;
+
+        // Everything is persisted under the new key; swap the master key.
+        self.encryption.replace_key(new_key)
     }
 
     #[allow(dead_code)]

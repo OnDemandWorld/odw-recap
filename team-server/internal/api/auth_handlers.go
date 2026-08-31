@@ -34,10 +34,13 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
-// AuthResponse represents an authentication response
+// AuthResponse represents an authentication response. Token is a short-lived
+// access token; RefreshToken rotates on every use (see refreshHandler).
 type AuthResponse struct {
-	Token string      `json:"token"`
-	User  models.User `json:"user"`
+	Token        string      `json:"token"`
+	RefreshToken string      `json:"refresh_token"`
+	ExpiresIn    int64       `json:"expires_in"`
+	User         models.User `json:"user"`
 }
 
 func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
@@ -105,16 +108,25 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate token
+	// Generate tokens
 	token, err := s.jwtManager.GenerateToken(user.ID, user.Email, user.Role)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to generate token")
 		return
 	}
+	refreshToken, err := s.storeRefresh(user.ID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to issue refresh token")
+		return
+	}
+
+	s.writeAudit(r, &user.ID, "register", strPtr("auth"), "user registered")
 
 	respondJSON(w, http.StatusCreated, AuthResponse{
-		Token: token,
-		User:  *user,
+		Token:        token,
+		RefreshToken: refreshToken,
+		ExpiresIn:    int64(auth.AccessTokenTTL.Seconds()),
+		User:         *user,
 	})
 }
 
@@ -134,6 +146,7 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 	).Scan(&user.ID, &user.Email, &passwordHash, &user.Name, &user.Role, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
+		s.writeAudit(r, nil, "login_failed", strPtr("auth"), "unknown email: "+req.Email)
 		respondError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	} else if err != nil {
@@ -143,20 +156,30 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		s.writeAudit(r, &user.ID, "login_failed", strPtr("auth"), "bad password")
 		respondError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
-	// Generate token
+	// Generate tokens
 	token, err := s.jwtManager.GenerateToken(user.ID, user.Email, user.Role)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to generate token")
 		return
 	}
+	refreshToken, err := s.storeRefresh(user.ID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to issue refresh token")
+		return
+	}
+
+	s.writeAudit(r, &user.ID, "login", strPtr("auth"), "login successful")
 
 	respondJSON(w, http.StatusOK, AuthResponse{
-		Token: token,
-		User:  user,
+		Token:        token,
+		RefreshToken: refreshToken,
+		ExpiresIn:    int64(auth.AccessTokenTTL.Seconds()),
+		User:         user,
 	})
 }
 

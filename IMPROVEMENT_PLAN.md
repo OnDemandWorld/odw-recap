@@ -1,7 +1,15 @@
 # Recap — Review, Refactor & Improvement Plan
 
-**Date:** 2026-09-01
+**Date:** 2026-09-01 (updated after the Phase-2 P0 sprint)
 **Scope:** Full-repository review and refactor (desktop app, team server, frontend, scripts, CI), bug fixes, and the prioritized roadmap of what to do next.
+
+> ## Phase status
+> - **Phase 1 (2026-09-01):** full review & refactor — see section 2. ✅
+> - **Phase 2 (2026-09-01):** the P0 sprint — **P0-1 vault unlock flow, P0-2
+>   team-server auth hardening, P0-4 safe passphrase change, and P0-5 lossless
+>   enum parsing are complete** (details in section 2.5). Remaining P0 item:
+>   **P0-3 real on-device transcription (whisper.cpp)** — deliberately its own
+>   dedicated effort.
 
 ---
 
@@ -96,13 +104,55 @@ template management. Test coverage grew from **7 → 16 Rust tests** and
 
 ### 2.4 Verification status
 
-| Check | Before | After |
-|-------|--------|-------|
-| Rust tests | 7 passing | **16 passing** (FTS, salt persistence, config round-trip, summaries, routers, rule-based summarizer) |
-| Go tests | 3 passing | **9 passing** (auth middleware, RBAC, JWT cross-secret) |
-| Rust warnings (project code) | 150 | **0** |
-| `cargo build` / `go build` | OK | OK |
-| `scripts/test-all.sh` | broken paths, crashed on `npm test` | runs green end-to-end |
+| Check | Before | After Phase 1 | After Phase 2 |
+|-------|--------|-------|-------|
+| Rust tests | 7 passing | 16 passing | **23 passing** |
+| Go tests | 3 passing | 9 passing | **15 functions / 17 cases passing** |
+| Rust warnings (project code) | 150 | 0 | **0** |
+| `cargo build` / `go build` | OK | OK | OK |
+| `scripts/test-all.sh` | broken paths, crashed on `npm test` | runs green | runs green |
+
+### 2.5 Phase 2 — P0 sprint (completed 2026-09-01)
+
+**P0-1 Vault unlock flow (desktop)**
+- Storage is constructed only after the vault is created or unlocked; while
+  locked, every command returns a clear "Vault is locked" error.
+- New commands: `vault_status`, `initialize_vault` (first run, with
+  confirmation + minimum length), `unlock_vault` (sentinel-based passphrase
+  verification), `lock_vault` (drops all in-memory key material),
+  `change_vault_passphrase`.
+- The plaintext `.passphrase` file is gone; a wrong passphrase fails at
+  unlock via the encrypted sentinel (`vault_check` config entry).
+- Frontend: full-screen setup/unlock gate, Enter-to-submit, inline errors,
+  Lock + Change-Passphrase controls in Settings. `RECAP_PASSPHRASE` remains
+  as an explicit headless/CI auto-unlock escape hatch.
+
+**P0-2 Team-server auth hardening**
+- Server fails closed without `JWT_SECRET` (`RECAP_INSECURE_DEV=1` bypass for
+  development only).
+- Access tokens shortened from 24 h to **15 minutes**; long sessions are
+  carried by **rotating refresh tokens** (30-day TTL) stored in Redis **as
+  SHA-256 hashes**; `POST /auth/refresh` rotates, `POST /auth/logout`
+  revokes, replayed tokens are rejected.
+- Every authenticated request re-validates the user against the database
+  (deleted accounts rejected immediately; role changes take effect at once).
+- Per-IP rate limiting on `/auth/register`, `/auth/login` (10/min) and
+  `/auth/refresh` (30/min); fails open with a log line if Redis is down.
+- Audit log is now actually written: register, login, login failures,
+  refresh, logout.
+- Tests with miniredis: rate-limit allow/block/reset/fail-open, refresh
+  lifecycle/expiry/no-raw-token-in-Redis, access-token TTL.
+
+**P0-4 Safe passphrase change**
+- `change_passphrase` re-encrypts every API key and the vault sentinel with
+  the new key inside a single SQLite transaction; the in-memory master key is
+  swapped only after commit. A failure leaves all data readable with the old
+  passphrase. Covered by tests.
+
+**P0-5 Lossless enum parsing**
+- `MeetingStatus`/`SyncStatus`/`AudioSource` now implement `TryFrom<String>`;
+  unknown stored values surface as errors instead of silently becoming
+  `Deleted`/`PermanentlyFailed`/`SystemCapture`. Round-trip tests added.
 
 ---
 
@@ -133,7 +183,7 @@ product loop, **P2** = scale & polish, **P3** = nice-to-have.
 
 ### P0 — Trust & correctness (1–2 sprints)
 
-#### P0-1. Real unlock flow for local encryption
+#### P0-1. Real unlock flow for local encryption ✅ DONE (Phase 2)
 - **Why:** the whole privacy pitch rests on at-rest encryption; a file-stored
   passphrase is a placeholder, not a product.
 - **What:** first-run passphrase creation screen; unlock screen on launch;
@@ -142,7 +192,7 @@ product loop, **P2** = scale & polish, **P3** = nice-to-have.
 - **Accept:** cold start requires unlock; deleting the keychain entry makes
   data unrecoverable by design; no plaintext key material in the data dir.
 
-#### P0-2. Team-server auth hardening
+#### P0-2. Team-server auth hardening ✅ DONE (Phase 2)
 - **Why:** default JWT secret still boots with a warning; tokens live 24 h
   with no revocation; role is trusted from the token.
 - **What:** fail closed when `JWT_SECRET` is unset (except explicit
@@ -163,7 +213,7 @@ product loop, **P2** = scale & polish, **P3** = nice-to-have.
 - **Accept:** importing a 30-minute m4a produces an accurate transcript fully
   offline on a laptop; UI shows progress; model choice persisted in settings.
 
-#### P0-4. Safe passphrase change
+#### P0-4. Safe passphrase change ✅ DONE (Phase 2)
 - **Why:** `change_passphrase` currently errors out; users need rotation.
 - **What:** implement re-encryption of all encrypted artifacts (api_keys rows,
   encrypted files) in a single transactional pass, with rollback on failure;
@@ -172,7 +222,7 @@ product loop, **P2** = scale & polish, **P3** = nice-to-have.
   the new passphrase and fail with the old one; crash mid-change leaves data
   readable with the old passphrase.
 
-#### P0-5. Lossless enum parsing
+#### P0-5. Lossless enum parsing ✅ DONE (Phase 2)
 - **Why:** unknown DB values currently become `MeetingStatus::Deleted` /
   `SyncStatus::PermanentlyFailed`, which can hide or corrupt data.
 - **What:** `TryFrom<String>` with explicit errors; store raw string in an

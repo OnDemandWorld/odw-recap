@@ -34,7 +34,47 @@ async function init() {
   document.querySelector("#refresh-btn").addEventListener("click", loadMeetings);
   document.querySelector("#save-api-keys-btn").addEventListener("click", saveSettings);
   document.querySelector("#create-template-btn").addEventListener("click", createPromptTemplate);
+  document.querySelector("#lock-vault-btn").addEventListener("click", lockVault);
+  document.querySelector("#change-passphrase-btn").addEventListener("click", changePassphrase);
 
+  bindVaultGateHandlers();
+  await refreshVaultGate();
+}
+
+// --- Vault gate ---------------------------------------------------------------
+
+function bindVaultGateHandlers() {
+  const createBtn = document.querySelector("#vault-create-btn");
+  const unlockBtn = document.querySelector("#vault-unlock-btn");
+  const unlockInput = document.querySelector("#vault-passphrase");
+  const confirmInput = document.querySelector("#vault-confirm-passphrase");
+
+  createBtn.addEventListener("click", createVault);
+  confirmInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") createVault();
+  });
+  unlockBtn.addEventListener("click", unlockVault);
+  unlockInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") unlockVault();
+  });
+}
+
+async function refreshVaultGate() {
+  try {
+    const status = await invoke("vault_status");
+    if (!status.initialized) {
+      showVaultOverlay("setup");
+      return;
+    }
+    if (status.locked) {
+      showVaultOverlay("unlock");
+      return;
+    }
+  } catch (error) {
+    console.error("Failed to query vault status:", error);
+  }
+
+  hideVaultOverlay();
   await Promise.all([
     loadMeetings(),
     loadSupportedFormats(),
@@ -43,6 +83,85 @@ async function init() {
     loadProviderStatus(),
   ]);
   showView("library");
+}
+
+function showVaultOverlay(mode) {
+  const overlay = document.querySelector("#vault-overlay");
+  const setupForm = document.querySelector("#vault-setup-form");
+  const unlockForm = document.querySelector("#vault-unlock-form");
+  const subtitle = document.querySelector("#vault-subtitle");
+
+  setVaultError("");
+  if (mode === "setup") {
+    subtitle.textContent = "Set up encrypted local storage to get started.";
+    setupForm.classList.remove("hidden");
+    unlockForm.classList.add("hidden");
+    document.querySelector("#vault-new-passphrase").focus();
+  } else {
+    subtitle.textContent = "Enter your passphrase to unlock your meetings.";
+    setupForm.classList.add("hidden");
+    unlockForm.classList.remove("hidden");
+    document.querySelector("#vault-passphrase").focus();
+  }
+  overlay.classList.remove("hidden");
+}
+
+function hideVaultOverlay() {
+  document.querySelector("#vault-overlay").classList.add("hidden");
+}
+
+function setVaultError(message) {
+  document.querySelector("#vault-error").textContent = message || "";
+}
+
+async function createVault() {
+  const passphrase = document.querySelector("#vault-new-passphrase").value;
+  const confirm = document.querySelector("#vault-confirm-passphrase").value;
+  try {
+    await invoke("initialize_vault", { passphrase, confirm });
+    document.querySelector("#vault-new-passphrase").value = "";
+    document.querySelector("#vault-confirm-passphrase").value = "";
+    await refreshVaultGate();
+  } catch (error) {
+    setVaultError(String(error));
+  }
+}
+
+async function unlockVault() {
+  const passphrase = document.querySelector("#vault-passphrase").value;
+  try {
+    await invoke("unlock_vault", { passphrase });
+    document.querySelector("#vault-passphrase").value = "";
+    await refreshVaultGate();
+  } catch (error) {
+    setVaultError(String(error));
+  }
+}
+
+async function lockVault() {
+  try {
+    await invoke("lock_vault");
+    meetings = [];
+    currentMeetingId = null;
+    setStatus("Vault locked");
+    await refreshVaultGate();
+  } catch (error) {
+    setStatus(`Failed to lock vault: ${error}`);
+  }
+}
+
+async function changePassphrase() {
+  const current = document.querySelector("#current-passphrase").value;
+  const newPass = document.querySelector("#new-passphrase").value;
+  try {
+    setStatus("Changing passphrase...");
+    await invoke("change_vault_passphrase", { current, new: newPass });
+    document.querySelector("#current-passphrase").value = "";
+    document.querySelector("#new-passphrase").value = "";
+    setStatus("Passphrase changed. All stored data was re-encrypted.");
+  } catch (error) {
+    setStatus(`Passphrase change failed: ${error}`);
+  }
 }
 
 // Show/hide views

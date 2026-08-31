@@ -8,6 +8,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// AccessTokenTTL keeps access tokens short-lived. Long sessions are carried
+// by rotating refresh tokens (see api/refresh.go), which can be revoked.
+const AccessTokenTTL = 15 * time.Minute
+
 // Claims represents JWT claims
 type Claims struct {
 	UserID uuid.UUID `json:"user_id"`
@@ -26,16 +30,17 @@ func NewJWTManager(secret string) *JWTManager {
 	return &JWTManager{secret: secret}
 }
 
-// GenerateToken generates a JWT token for a user
+// GenerateToken generates a short-lived access token for a user.
 func (m *JWTManager) GenerateToken(userID uuid.UUID, email, role string) (string, error) {
+	now := time.Now()
 	claims := &Claims{
 		UserID: userID,
 		Email:  email,
 		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(now.Add(AccessTokenTTL)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
 			Issuer:    "recap-team-server",
 		},
 	}

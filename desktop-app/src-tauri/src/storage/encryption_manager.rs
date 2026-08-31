@@ -84,14 +84,18 @@ impl EncryptionManager {
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let guard = self.master_key.lock().map_err(|_| {
-            RecapError::Encryption("Failed to lock master key".to_string())
-        })?;
+        let key = self.current_key()?;
+        Self::encrypt_with_key(&key, plaintext)
+    }
 
-        let key = guard.as_ref().ok_or_else(|| {
-            RecapError::Encryption("Encryption manager not unlocked".to_string())
-        })?;
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let key = self.current_key()?;
+        Self::decrypt_with_key(&key, ciphertext)
+    }
 
+    /// Encrypt with an explicit key (used for re-encryption during a
+    /// passphrase change, before the master key is swapped).
+    pub fn encrypt_with_key(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
         let cipher = Aes256Gcm::new_from_slice(key)
             .map_err(|e| RecapError::Encryption(e.to_string()))?;
 
@@ -110,18 +114,12 @@ impl EncryptionManager {
         Ok(result)
     }
 
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    /// Decrypt with an explicit key (used for re-encryption during a
+    /// passphrase change).
+    pub fn decrypt_with_key(key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>> {
         if ciphertext.len() < 12 {
             return Err(RecapError::Encryption("Invalid ciphertext".to_string()));
         }
-
-        let guard = self.master_key.lock().map_err(|_| {
-            RecapError::Encryption("Failed to lock master key".to_string())
-        })?;
-
-        let key = guard.as_ref().ok_or_else(|| {
-            RecapError::Encryption("Encryption manager not unlocked".to_string())
-        })?;
 
         let cipher = Aes256Gcm::new_from_slice(key)
             .map_err(|e| RecapError::Encryption(e.to_string()))?;
@@ -133,6 +131,26 @@ impl EncryptionManager {
         cipher
             .decrypt(nonce, encrypted)
             .map_err(|e| RecapError::Encryption(e.to_string()))
+    }
+
+    /// Check whether `passphrase` derives the current master key. Used to
+    /// verify the current passphrase before a passphrase change.
+    pub fn verify_passphrase(&self, passphrase: &str) -> Result<bool> {
+        let derived = self.derive_key(passphrase)?;
+        let guard = self.master_key.lock().map_err(|_| {
+            RecapError::Encryption("Failed to lock master key".to_string())
+        })?;
+        Ok(guard.as_ref().map(|k| k == &derived).unwrap_or(false))
+    }
+
+    fn current_key(&self) -> Result<[u8; 32]> {
+        let guard = self.master_key.lock().map_err(|_| {
+            RecapError::Encryption("Failed to lock master key".to_string())
+        })?;
+        guard
+            .as_ref()
+            .copied()
+            .ok_or_else(|| RecapError::Encryption("Encryption manager not unlocked".to_string()))
     }
 
     pub fn generate_salt() -> [u8; 32] {

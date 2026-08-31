@@ -55,15 +55,20 @@ impl fmt::Display for MeetingStatus {
     }
 }
 
-impl From<String> for MeetingStatus {
-    fn from(s: String) -> Self {
+/// Lossless parsing: an unknown stored value is an error, never a silent
+/// state change (previously unknown values became `Deleted`).
+impl TryFrom<String> for MeetingStatus {
+    type Error = String;
+
+    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
         match s.as_str() {
-            "recording" => MeetingStatus::Recording,
-            "processing" => MeetingStatus::Processing,
-            "completed" => MeetingStatus::Completed,
-            "failed" => MeetingStatus::Failed,
-            "archived" => MeetingStatus::Archived,
-            _ => MeetingStatus::Deleted,
+            "recording" => Ok(MeetingStatus::Recording),
+            "processing" => Ok(MeetingStatus::Processing),
+            "completed" => Ok(MeetingStatus::Completed),
+            "failed" => Ok(MeetingStatus::Failed),
+            "archived" => Ok(MeetingStatus::Archived),
+            "deleted" => Ok(MeetingStatus::Deleted),
+            other => Err(format!("unknown meeting status: '{}'", other)),
         }
     }
 }
@@ -90,14 +95,19 @@ impl fmt::Display for SyncStatus {
     }
 }
 
-impl From<String> for SyncStatus {
-    fn from(s: String) -> Self {
+/// Lossless parsing: an unknown stored value is an error, never a silent
+/// state change (previously unknown values became `PermanentlyFailed`).
+impl TryFrom<String> for SyncStatus {
+    type Error = String;
+
+    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
         match s.as_str() {
-            "not_synced" => SyncStatus::NotSynced,
-            "syncing" => SyncStatus::Syncing,
-            "synced" => SyncStatus::Synced,
-            "failed" => SyncStatus::Failed,
-            _ => SyncStatus::PermanentlyFailed,
+            "not_synced" => Ok(SyncStatus::NotSynced),
+            "syncing" => Ok(SyncStatus::Syncing),
+            "synced" => Ok(SyncStatus::Synced),
+            "failed" => Ok(SyncStatus::Failed),
+            "permanently_failed" => Ok(SyncStatus::PermanentlyFailed),
+            other => Err(format!("unknown sync status: '{}'", other)),
         }
     }
 }
@@ -122,13 +132,18 @@ impl fmt::Display for AudioSource {
     }
 }
 
-impl From<String> for AudioSource {
-    fn from(s: String) -> Self {
+/// Lossless parsing: an unknown stored value is an error, never a silent
+/// state change (previously unknown values became `SystemCapture`).
+impl TryFrom<String> for AudioSource {
+    type Error = String;
+
+    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
         match s.as_str() {
-            "file_import" => AudioSource::FileImport,
-            "mobile_upload" => AudioSource::MobileUpload,
-            "watch_folder" => AudioSource::WatchFolder,
-            _ => AudioSource::SystemCapture,
+            "system_capture" => Ok(AudioSource::SystemCapture),
+            "file_import" => Ok(AudioSource::FileImport),
+            "mobile_upload" => Ok(AudioSource::MobileUpload),
+            "watch_folder" => Ok(AudioSource::WatchFolder),
+            other => Err(format!("unknown audio source: '{}'", other)),
         }
     }
 }
@@ -202,4 +217,58 @@ pub struct Decision {
     pub vault_entry_id: Option<String>,
     pub sync_status: SyncStatus,
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_meeting_status_roundtrip() {
+        for status in [
+            MeetingStatus::Recording,
+            MeetingStatus::Processing,
+            MeetingStatus::Completed,
+            MeetingStatus::Failed,
+            MeetingStatus::Archived,
+            MeetingStatus::Deleted,
+        ] {
+            let raw = status.to_string();
+            assert_eq!(MeetingStatus::try_from(raw.clone()).unwrap().to_string(), raw);
+        }
+    }
+
+    #[test]
+    fn test_sync_status_roundtrip() {
+        for status in [
+            SyncStatus::NotSynced,
+            SyncStatus::Syncing,
+            SyncStatus::Synced,
+            SyncStatus::Failed,
+            SyncStatus::PermanentlyFailed,
+        ] {
+            let raw = status.to_string();
+            assert_eq!(SyncStatus::try_from(raw.clone()).unwrap().to_string(), raw);
+        }
+    }
+
+    #[test]
+    fn test_audio_source_roundtrip() {
+        for source in [
+            AudioSource::SystemCapture,
+            AudioSource::FileImport,
+            AudioSource::MobileUpload,
+            AudioSource::WatchFolder,
+        ] {
+            let raw = source.to_string();
+            assert_eq!(AudioSource::try_from(raw.clone()).unwrap().to_string(), raw);
+        }
+    }
+
+    #[test]
+    fn test_unknown_values_are_errors() {
+        assert!(MeetingStatus::try_from("banana".to_string()).is_err());
+        assert!(SyncStatus::try_from("banana".to_string()).is_err());
+        assert!(AudioSource::try_from("banana".to_string()).is_err());
+    }
 }

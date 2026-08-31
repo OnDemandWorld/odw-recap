@@ -68,14 +68,19 @@ func (s *Server) Router() http.Handler {
 		MaxAge:           300,
 	}))
 
-	// Public routes
+	// Public routes. Auth endpoints are rate limited per client IP to blunt
+	// credential-stuffing and brute-force attempts.
 	r.Get("/health", s.healthHandler)
-	r.Post("/auth/register", s.registerHandler)
-	r.Post("/auth/login", s.loginHandler)
+	r.With(s.rateLimit(10, time.Minute)).Post("/auth/register", s.registerHandler)
+	r.With(s.rateLimit(10, time.Minute)).Post("/auth/login", s.loginHandler)
+	r.With(s.rateLimit(30, time.Minute)).Post("/auth/refresh", s.refreshHandler)
+	r.Post("/auth/logout", s.logoutHandler)
 
-	// Protected routes
+	// Protected routes. userSync re-validates the token's user against the
+	// database on every request (immediate revocation + role changes).
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(s.jwtManager))
+		r.Use(s.userSync)
 
 		// User routes
 		r.Get("/me", s.meHandler)

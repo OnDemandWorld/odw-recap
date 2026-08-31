@@ -3,28 +3,24 @@ pub mod variable_substitution;
 
 use crate::error::Result;
 use crate::storage::StorageManager;
-use std::sync::Arc;
-use std::sync::Mutex;
 
 pub use template::{PromptTemplate, PromptVariable};
 pub use variable_substitution::substitute_variables;
 
-/// Prompt manager for handling prompt templates
-pub struct PromptManager {
-    storage: Arc<Mutex<StorageManager>>,
+/// Prompt manager for handling prompt templates. Borrows an unlocked
+/// `StorageManager`; vault locking is handled by the caller.
+pub struct PromptManager<'a> {
+    storage: &'a StorageManager,
 }
 
-impl PromptManager {
-    pub fn new(storage: Arc<Mutex<StorageManager>>) -> Self {
+impl<'a> PromptManager<'a> {
+    pub fn new(storage: &'a StorageManager) -> Self {
         Self { storage }
     }
 
     /// Get a prompt template by name
     pub fn get_template(&self, name: &str) -> Result<Option<PromptTemplate>> {
-        let storage = self.storage.lock().map_err(|_| {
-            crate::error::RecapError::Storage("Failed to lock storage".to_string())
-        })?;
-        let result = storage.get_prompt_template(name)?;
+        let result = self.storage.get_prompt_template(name)?;
         Ok(result.map(|(content, _meeting_type, _is_custom)| {
             let variables = PromptTemplate::extract_variables(&content);
             PromptTemplate {
@@ -41,18 +37,13 @@ impl PromptManager {
 
     /// Save a prompt template
     pub fn save_template(&self, template: &PromptTemplate) -> Result<()> {
-        let storage = self.storage.lock().map_err(|_| {
-            crate::error::RecapError::Storage("Failed to lock storage".to_string())
-        })?;
-        storage.save_prompt_template(&template.name, &template.content, None, true)
+        self.storage
+            .save_prompt_template(&template.name, &template.content, None, true)
     }
 
     /// List all prompt templates
     pub fn list_templates(&self) -> Result<Vec<PromptTemplate>> {
-        let storage = self.storage.lock().map_err(|_| {
-            crate::error::RecapError::Storage("Failed to lock storage".to_string())
-        })?;
-        let rows = storage.list_prompt_templates()?;
+        let rows = self.storage.list_prompt_templates()?;
         Ok(rows
             .into_iter()
             .map(|(name, content, _meeting_type, _is_custom)| {

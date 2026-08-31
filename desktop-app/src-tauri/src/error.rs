@@ -9,6 +9,9 @@ pub enum RecapError {
     #[error("Encryption error: {0}")]
     Encryption(String),
 
+    #[error("Vault error: {0}")]
+    Vault(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 

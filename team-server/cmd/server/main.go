@@ -30,10 +30,16 @@ func main() {
 		redisURL = "localhost:6379"
 	}
 
+	// Fail closed: never boot with a guessable signing secret. Development
+	// setups must opt in explicitly with RECAP_INSECURE_DEV=1.
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
-		jwtSecret = "change-this-secret-in-production"
-		log.Println("WARNING: Using default JWT secret. Set JWT_SECRET environment variable!")
+		if os.Getenv("RECAP_INSECURE_DEV") == "1" {
+			jwtSecret = "insecure-dev-secret-do-not-use-in-production"
+			log.Println("WARNING: RECAP_INSECURE_DEV=1 — using an insecure development JWT secret.")
+		} else {
+			log.Fatal("JWT_SECRET environment variable is required (set RECAP_INSECURE_DEV=1 to bypass in development)")
+		}
 	}
 
 	// Initialize database

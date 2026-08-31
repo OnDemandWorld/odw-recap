@@ -12,7 +12,7 @@ mod sync;
 mod transcription;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::State;
 
 use crate::audio_input::{AudioInputManager, SUPPORTED_AUDIO_FORMATS};
@@ -22,9 +22,25 @@ use crate::storage::sqlite_manager::SqliteManager;
 use crate::storage::types::*;
 use crate::storage::StorageManager;
 
+/// Locked/unlocked vault holding all application data managers.
+///
+/// Storage is only constructed after the vault is created (first run) or
+/// unlocked (later runs), so encrypted data is never accessible while the
+/// vault is locked.
+struct VaultState {
+    storage: Option<StorageManager>,
+    config: Option<ConfigManager>,
+}
+
 struct AppState {
-    storage: Arc<Mutex<StorageManager>>,
-    config: Arc<Mutex<ConfigManager>>,
+    vault: Arc<Mutex<VaultState>>,
+    data_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VaultStatus {
+    pub initialized: bool,
+    pub locked: bool,
 }
 
 /// Resolve the directory where Recap stores its database, audio, and keys.
@@ -35,71 +51,129 @@ fn resolve_data_dir() -> PathBuf {
         .join("Recap")
 }
 
-/// Get the passphrase used to unlock local encryption.
-///
-/// Order of precedence:
-/// 1. `RECAP_PASSPHRASE` environment variable (for users who manage their own secret)
-/// 2. A per-installation random passphrase stored in `<data_dir>/.passphrase`
-///    with owner-only permissions.
-///
-/// TODO: replace the file-stored passphrase with a real unlock flow (user
-/// prompt + OS keychain) — see IMPROVEMENT_PLAN.md.
-fn load_or_create_passphrase(data_dir: &Path) -> Result<String> {
-    if let Ok(passphrase) = std::env::var("RECAP_PASSPHRASE") {
-        if !passphrase.is_empty() {
-            return Ok(passphrase);
-        }
-    }
-
-    let passphrase_path = data_dir.join(".passphrase");
-    if passphrase_path.exists() {
-        let passphrase = std::fs::read_to_string(&passphrase_path)?;
-        let passphrase = passphrase.trim().to_string();
-        if !passphrase.is_empty() {
-            return Ok(passphrase);
-        }
-    }
-
-    std::fs::create_dir_all(data_dir)?;
-    let random: String = {
-        use rand::{distributions::Alphanumeric, Rng};
-        rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(48)
-            .map(char::from)
-            .collect()
-    };
-
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(&passphrase_path)?;
-        file.write_all(random.as_bytes())?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&passphrase_path, random.as_bytes())?;
-    }
-
-    Ok(random)
+fn acquire_vault(vault: &Arc<Mutex<VaultState>>) -> Result<MutexGuard<'_, VaultState>> {
+    vault
+        .lock()
+        .map_err(|_| RecapError::Vault("Failed to lock vault state (poisoned mutex)".to_string()))
 }
 
-fn lock_storage(storage: &Arc<Mutex<StorageManager>>) -> Result<std::sync::MutexGuard<'_, StorageManager>> {
-    storage.lock().map_err(|_| {
-        RecapError::Storage("Failed to lock storage (poisoned mutex)".to_string())
+fn storage_of<'a>(guard: &'a MutexGuard<'a, VaultState>) -> Result<&'a StorageManager> {
+    guard.storage.as_ref().ok_or_else(|| {
+        RecapError::Vault("Vault is locked — unlock it to continue".to_string())
     })
 }
 
-fn lock_config(config: &Arc<Mutex<ConfigManager>>) -> Result<std::sync::MutexGuard<'_, ConfigManager>> {
-    config.lock().map_err(|_| {
-        RecapError::Config("Failed to lock config (poisoned mutex)".to_string())
+fn config_of<'a>(guard: &'a MutexGuard<'a, VaultState>) -> Result<&'a ConfigManager> {
+    guard.config.as_ref().ok_or_else(|| {
+        RecapError::Vault("Vault is locked — unlock it to continue".to_string())
     })
 }
+
+/// Build the config manager for the vault's database (a second SQLite
+/// connection dedicated to configuration, which is not secret).
+fn build_config(data_dir: &Path) -> Result<ConfigManager> {
+    let db_path = data_dir.join("recap.db");
+    let db = SqliteManager::new(&db_path)?;
+    Ok(ConfigManager::new(db))
+}
+
+/// Seed default prompt templates (idempotent; existing templates win).
+fn seed_default_templates(storage: &StorageManager) {
+    if let Err(e) = crate::prompt_manager::PromptManager::new(storage).initialize_default_templates()
+    {
+        eprintln!("Failed to initialize default prompt templates: {}", e);
+    }
+}
+
+fn validate_new_passphrase(passphrase: &str) -> Result<()> {
+    if passphrase.len() < 8 {
+        return Err(RecapError::Vault(
+            "Passphrase must be at least 8 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+// --- Vault commands ---------------------------------------------------------
+
+#[tauri::command]
+fn vault_status(state: State<AppState>) -> Result<VaultStatus> {
+    let guard = acquire_vault(&state.vault)?;
+    Ok(VaultStatus {
+        initialized: storage::vault_initialized(&state.data_dir),
+        locked: guard.storage.is_none(),
+    })
+}
+
+/// First run: create the vault with the user's passphrase.
+#[tauri::command]
+fn initialize_vault(passphrase: String, confirm: String, state: State<AppState>) -> Result<()> {
+    validate_new_passphrase(&passphrase)?;
+    if passphrase != confirm {
+        return Err(RecapError::Vault("Passphrases do not match".to_string()));
+    }
+
+    let mut guard = acquire_vault(&state.vault)?;
+    if guard.storage.is_some() {
+        return Err(RecapError::Vault("Vault is already initialized and unlocked".to_string()));
+    }
+    if storage::vault_initialized(&state.data_dir) {
+        return Err(RecapError::Vault(
+            "Vault is already initialized — unlock it instead".to_string(),
+        ));
+    }
+
+    let storage = StorageManager::initialize(state.data_dir.clone(), &passphrase)?;
+    seed_default_templates(&storage);
+    guard.config = Some(build_config(&state.data_dir)?);
+    guard.storage = Some(storage);
+    Ok(())
+}
+
+/// Unlock an existing vault with the user's passphrase.
+#[tauri::command]
+fn unlock_vault(passphrase: String, state: State<AppState>) -> Result<()> {
+    let mut guard = acquire_vault(&state.vault)?;
+    if guard.storage.is_some() {
+        return Ok(()); // already unlocked
+    }
+    if !storage::vault_initialized(&state.data_dir) {
+        return Err(RecapError::Vault(
+            "Vault is not initialized on this device — set one up first".to_string(),
+        ));
+    }
+
+    let storage = StorageManager::open(state.data_dir.clone(), &passphrase)?;
+    seed_default_templates(&storage);
+    guard.config = Some(build_config(&state.data_dir)?);
+    guard.storage = Some(storage);
+    Ok(())
+}
+
+/// Lock the vault, dropping all in-memory key material.
+#[tauri::command]
+fn lock_vault(state: State<AppState>) -> Result<()> {
+    let mut guard = acquire_vault(&state.vault)?;
+    guard.storage = None;
+    guard.config = None;
+    Ok(())
+}
+
+/// Change the vault passphrase. All encrypted data is re-encrypted with the
+/// new key in a single transaction (see StorageManager::change_passphrase).
+#[tauri::command]
+fn change_vault_passphrase(current: String, new: String, state: State<AppState>) -> Result<()> {
+    validate_new_passphrase(&new)?;
+
+    let guard = acquire_vault(&state.vault)?;
+    let storage = storage_of(&guard)?;
+    if !storage.get_encryption().verify_passphrase(&current)? {
+        return Err(RecapError::Vault("Current passphrase is incorrect".to_string()));
+    }
+    storage.change_passphrase(&new)
+}
+
+// --- Meeting commands -------------------------------------------------------
 
 #[tauri::command]
 fn create_meeting(title: String, state: State<AppState>) -> Result<String> {
@@ -134,40 +208,47 @@ fn create_meeting(title: String, state: State<AppState>) -> Result<String> {
     };
 
     let meeting_id = meeting.id;
-    lock_storage(&state.storage)?.create_meeting(&meeting)?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.create_meeting(&meeting)?;
     Ok(meeting_id.to_string())
 }
 
 #[tauri::command]
 fn list_meetings(limit: i64, offset: i64, state: State<AppState>) -> Result<Vec<Meeting>> {
-    lock_storage(&state.storage)?.list_meetings(limit, offset)
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.list_meetings(limit, offset)
 }
 
 #[tauri::command]
 fn get_meeting(id: String, state: State<AppState>) -> Result<Option<Meeting>> {
     let meeting_id = uuid::Uuid::parse_str(&id)
         .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
-    lock_storage(&state.storage)?.get_meeting(meeting_id)
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.get_meeting(meeting_id)
 }
 
 #[tauri::command]
 fn get_config(key: String, state: State<AppState>) -> Result<Option<String>> {
-    lock_config(&state.config)?.get_string(&key)
+    let guard = acquire_vault(&state.vault)?;
+    config_of(&guard)?.get_string(&key)
 }
 
 #[tauri::command]
 fn set_config(key: String, value: String, state: State<AppState>) -> Result<()> {
-    lock_config(&state.config)?.set_string(&key, &value)
+    let guard = acquire_vault(&state.vault)?;
+    config_of(&guard)?.set_string(&key, &value)
 }
 
 #[tauri::command]
 fn save_api_key(provider: String, api_key: String, state: State<AppState>) -> Result<()> {
-    lock_storage(&state.storage)?.save_api_key(&provider, &api_key)
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.save_api_key(&provider, &api_key)
 }
 
 #[tauri::command]
 fn has_api_key(provider: String, state: State<AppState>) -> Result<bool> {
-    Ok(lock_storage(&state.storage)?.get_api_key(&provider)?.is_some())
+    let guard = acquire_vault(&state.vault)?;
+    Ok(storage_of(&guard)?.get_api_key(&provider)?.is_some())
 }
 
 #[tauri::command]
@@ -175,8 +256,8 @@ fn import_audio_file(path: String, state: State<AppState>) -> Result<String> {
     use uuid::Uuid;
 
     let inbox_path = {
-        let storage = lock_storage(&state.storage)?;
-        storage.get_file_store().get_inbox_dir()
+        let guard = acquire_vault(&state.vault)?;
+        storage_of(&guard)?.get_file_store().get_inbox_dir()
     };
 
     let manager = AudioInputManager::new(inbox_path);
@@ -219,7 +300,8 @@ fn import_audio_file(path: String, state: State<AppState>) -> Result<String> {
     };
 
     let meeting_id = meeting.id;
-    lock_storage(&state.storage)?.create_meeting(&meeting)?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.create_meeting(&meeting)?;
 
     Ok(meeting_id.to_string())
 }
@@ -233,21 +315,26 @@ fn get_supported_audio_formats() -> Vec<String> {
 fn get_transcript_segments(meeting_id: String, state: State<AppState>) -> Result<Vec<TranscriptSegment>> {
     let id = uuid::Uuid::parse_str(&meeting_id)
         .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
-    lock_storage(&state.storage)?.get_transcript_segments(id)
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.get_transcript_segments(id)
 }
 
 #[tauri::command]
 fn get_summary(meeting_id: String, state: State<AppState>) -> Result<Option<Summary>> {
     let id = uuid::Uuid::parse_str(&meeting_id)
         .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
-    lock_storage(&state.storage)?.get_summary(id)
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.get_summary(id)
 }
 
 #[tauri::command]
 fn search_transcripts(query: String, limit: i64, state: State<AppState>) -> Result<Vec<(String, String)>> {
-    let results = lock_storage(&state.storage)?.search_transcripts(&query, limit)?;
+    let guard = acquire_vault(&state.vault)?;
+    let results = storage_of(&guard)?.search_transcripts(&query, limit)?;
     Ok(results.into_iter().map(|(id, text)| (id.to_string(), text)).collect())
 }
+
+// --- Provider commands ------------------------------------------------------
 
 /// Availability info for a single provider, surfaced in the settings UI.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -255,65 +342,6 @@ pub struct ProviderStatus {
     pub name: String,
     pub available: bool,
     pub models: Vec<String>,
-}
-
-#[tauri::command]
-async fn list_stt_providers(state: State<'_, AppState>) -> Result<Vec<ProviderStatus>> {
-    use crate::transcription::STTRouter;
-
-    let credentials = {
-        let storage = lock_storage(&state.storage)?;
-        let config = lock_config(&state.config)?;
-        collect_credentials(&storage, &config)?
-    };
-
-    let router = STTRouter::with_all_providers(String::new(), &credentials);
-    let mut statuses = Vec::new();
-    for name in router.available_providers() {
-        let Some(provider) = router.get_provider(&name) else { continue };
-        statuses.push(ProviderStatus {
-            name: provider.name().to_string(),
-            available: provider.is_available().await.unwrap_or(false),
-            models: provider.supported_models(),
-        });
-    }
-    statuses.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(statuses)
-}
-
-#[tauri::command]
-async fn list_llm_providers(state: State<'_, AppState>) -> Result<Vec<ProviderStatus>> {
-    use crate::summarization::LLMRouter;
-
-    let credentials = {
-        let storage = lock_storage(&state.storage)?;
-        let config = lock_config(&state.config)?;
-        collect_credentials(&storage, &config)?
-    };
-
-    let router = LLMRouter::with_all_providers(String::new(), &credentials);
-    let mut statuses = Vec::new();
-    for name in router.available_providers() {
-        let Some(provider) = router.get_provider(&name) else { continue };
-        statuses.push(ProviderStatus {
-            name: provider.name().to_string(),
-            available: provider.is_available().await.unwrap_or(false),
-            models: provider.supported_models(),
-        });
-    }
-    statuses.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(statuses)
-}
-
-#[tauri::command]
-fn list_prompt_templates(state: State<AppState>) -> Result<Vec<crate::prompt_manager::PromptTemplate>> {
-    crate::prompt_manager::PromptManager::new(state.storage.clone()).list_templates()
-}
-
-#[tauri::command]
-fn save_prompt_template(name: String, content: String, state: State<AppState>) -> Result<()> {
-    let template = crate::prompt_manager::PromptTemplate::new(name, String::new(), content);
-    crate::prompt_manager::PromptManager::new(state.storage.clone()).save_template(&template)
 }
 
 /// Providers for which we look up an encrypted API key in storage.
@@ -360,6 +388,70 @@ fn collect_credentials(
     Ok(credentials)
 }
 
+/// Load credentials from the vault (single lock acquisition). Returns an
+/// error when the vault is locked.
+fn load_credentials(state: &State<AppState>) -> Result<std::collections::HashMap<String, String>> {
+    let guard = acquire_vault(&state.vault)?;
+    let storage = storage_of(&guard)?;
+    let config = config_of(&guard)?;
+    collect_credentials(storage, config)
+}
+
+#[tauri::command]
+async fn list_stt_providers(state: State<'_, AppState>) -> Result<Vec<ProviderStatus>> {
+    use crate::transcription::STTRouter;
+
+    let credentials = load_credentials(&state)?;
+    let router = STTRouter::with_all_providers(String::new(), &credentials);
+    let mut statuses = Vec::new();
+    for name in router.available_providers() {
+        let Some(provider) = router.get_provider(&name) else { continue };
+        statuses.push(ProviderStatus {
+            name: provider.name().to_string(),
+            available: provider.is_available().await.unwrap_or(false),
+            models: provider.supported_models(),
+        });
+    }
+    statuses.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(statuses)
+}
+
+#[tauri::command]
+async fn list_llm_providers(state: State<'_, AppState>) -> Result<Vec<ProviderStatus>> {
+    use crate::summarization::LLMRouter;
+
+    let credentials = load_credentials(&state)?;
+    let router = LLMRouter::with_all_providers(String::new(), &credentials);
+    let mut statuses = Vec::new();
+    for name in router.available_providers() {
+        let Some(provider) = router.get_provider(&name) else { continue };
+        statuses.push(ProviderStatus {
+            name: provider.name().to_string(),
+            available: provider.is_available().await.unwrap_or(false),
+            models: provider.supported_models(),
+        });
+    }
+    statuses.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(statuses)
+}
+
+// --- Prompt template commands -----------------------------------------------
+
+#[tauri::command]
+fn list_prompt_templates(state: State<AppState>) -> Result<Vec<crate::prompt_manager::PromptTemplate>> {
+    let guard = acquire_vault(&state.vault)?;
+    crate::prompt_manager::PromptManager::new(storage_of(&guard)?).list_templates()
+}
+
+#[tauri::command]
+fn save_prompt_template(name: String, content: String, state: State<AppState>) -> Result<()> {
+    let template = crate::prompt_manager::PromptTemplate::new(name, String::new(), content);
+    let guard = acquire_vault(&state.vault)?;
+    crate::prompt_manager::PromptManager::new(storage_of(&guard)?).save_template(&template)
+}
+
+// --- Pipeline commands ------------------------------------------------------
+
 /// Transcribe a meeting's audio file with the configured STT provider and
 /// store the resulting segments. Returns the number of segments stored.
 #[tauri::command]
@@ -368,15 +460,16 @@ async fn transcribe_meeting(meeting_id: String, state: State<'_, AppState>) -> R
 
     // Gather everything we need without holding locks across awaits.
     let (meeting, provider_name, credentials) = {
-        let storage = lock_storage(&state.storage)?;
-        let config = lock_config(&state.config)?;
+        let guard = acquire_vault(&state.vault)?;
+        let storage = storage_of(&guard)?;
+        let config = config_of(&guard)?;
         let meeting_id = uuid::Uuid::parse_str(&meeting_id)
             .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
         let meeting = storage
             .get_meeting(meeting_id)?
             .ok_or_else(|| RecapError::Storage("Meeting not found".to_string()))?;
         let provider_name = config.stt_provider()?;
-        let credentials = collect_credentials(&storage, &config)?;
+        let credentials = collect_credentials(storage, config)?;
         (meeting, provider_name, credentials)
     };
 
@@ -399,7 +492,8 @@ async fn transcribe_meeting(meeting_id: String, state: State<'_, AppState>) -> R
     let now = chrono::Utc::now().timestamp_millis();
 
     {
-        let storage = lock_storage(&state.storage)?;
+        let guard = acquire_vault(&state.vault)?;
+        let storage = storage_of(&guard)?;
         for segment in &result.segments {
             let mut segment = segment.clone();
             segment.meeting_id = meeting.id;
@@ -423,19 +517,23 @@ async fn summarize_meeting(meeting_id: String, state: State<'_, AppState>) -> Re
     use crate::summarization::{LLMRouter, SummarizationConfig, SummarizationManager};
 
     let (meeting_id, provider_name, credentials) = {
-        let storage = lock_storage(&state.storage)?;
-        let config = lock_config(&state.config)?;
+        let guard = acquire_vault(&state.vault)?;
+        let storage = storage_of(&guard)?;
+        let config = config_of(&guard)?;
         let meeting_id = uuid::Uuid::parse_str(&meeting_id)
             .map_err(|e| RecapError::Storage(format!("Invalid meeting id: {}", e)))?;
         let _meeting = storage
             .get_meeting(meeting_id)?
             .ok_or_else(|| RecapError::Storage("Meeting not found".to_string()))?;
         let provider_name = config.llm_provider()?;
-        let credentials = collect_credentials(&storage, &config)?;
+        let credentials = collect_credentials(storage, config)?;
         (meeting_id, provider_name, credentials)
     };
 
-    let segments = lock_storage(&state.storage)?.get_transcript_segments(meeting_id)?;
+    let segments = {
+        let guard = acquire_vault(&state.vault)?;
+        storage_of(&guard)?.get_transcript_segments(meeting_id)?
+    };
     if segments.is_empty() {
         return Err(RecapError::Summarization(
             "No transcript found for this meeting. Run transcription first.".to_string(),
@@ -472,39 +570,57 @@ async fn summarize_meeting(meeting_id: String, state: State<'_, AppState>) -> Re
         updated_at: now,
         user_edited: false,
     };
-    lock_storage(&state.storage)?.save_summary(&summary)?;
+    let guard = acquire_vault(&state.vault)?;
+    storage_of(&guard)?.save_summary(&summary)?;
 
     Ok(result.summary)
 }
 
 fn main() {
     let data_dir = resolve_data_dir();
-    let passphrase = load_or_create_passphrase(&data_dir)
-        .expect("Failed to initialize local passphrase");
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("Failed to create data directory {}: {}", data_dir.display(), e);
+    }
 
-    let storage = StorageManager::new(data_dir.clone(), &passphrase)
-        .expect("Failed to initialize storage");
-
-    let db_path = data_dir.join("recap.db");
-    let db = SqliteManager::new(&db_path).expect("Failed to initialize database");
-    let config = ConfigManager::new(db);
-
-    let app_state = AppState {
-        storage: Arc::new(Mutex::new(storage)),
-        config: Arc::new(Mutex::new(config)),
+    let mut vault = VaultState {
+        storage: None,
+        config: None,
     };
 
-    // Seed default prompt templates (idempotent; existing templates win).
-    if let Err(e) =
-        crate::prompt_manager::PromptManager::new(app_state.storage.clone())
-            .initialize_default_templates()
-    {
-        eprintln!("Failed to initialize default prompt templates: {}", e);
+    // Optional headless/CI auto-unlock: when RECAP_PASSPHRASE is set and a
+    // vault exists, unlock automatically. Interactive users go through the
+    // unlock screen instead.
+    if let Ok(passphrase) = std::env::var("RECAP_PASSPHRASE") {
+        if !passphrase.is_empty() && storage::vault_initialized(&data_dir) {
+            match StorageManager::open(data_dir.clone(), &passphrase) {
+                Ok(storage) => {
+                    seed_default_templates(&storage);
+                    match build_config(&data_dir) {
+                        Ok(config) => {
+                            vault.config = Some(config);
+                            vault.storage = Some(storage);
+                        }
+                        Err(e) => eprintln!("Failed to open config after auto-unlock: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("RECAP_PASSPHRASE auto-unlock failed: {}", e),
+            }
+        }
     }
+
+    let app_state = AppState {
+        vault: Arc::new(Mutex::new(vault)),
+        data_dir,
+    };
 
     tauri::Builder::default()
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
+            vault_status,
+            initialize_vault,
+            unlock_vault,
+            lock_vault,
+            change_vault_passphrase,
             create_meeting,
             list_meetings,
             get_meeting,

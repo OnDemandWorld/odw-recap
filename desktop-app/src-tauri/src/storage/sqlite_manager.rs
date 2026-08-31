@@ -16,6 +16,22 @@ fn parse_stored_uuid(raw: &str) -> Result<Uuid> {
     })
 }
 
+/// Parse an enum column losslessly: unknown values surface as errors instead
+/// of silently mapping to a default variant.
+fn parse_enum<T: TryFrom<String, Error = String>>(row: &rusqlite::Row, name: &str) -> rusqlite::Result<T> {
+    let raw: String = row.get(name)?;
+    T::try_from(raw.clone()).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} (column '{}')", e, name),
+            )),
+        )
+    })
+}
+
 impl SqliteManager {
     pub fn new(db_path: &Path) -> Result<Self> {
         let conn = Connection::open(db_path)?;
@@ -159,7 +175,7 @@ impl SqliteManager {
             started_at: row.get("started_at")?,
             ended_at: row.get("ended_at")?,
             duration_seconds: row.get("duration_seconds")?,
-            status: row.get::<_, String>("status")?.into(),
+            status: parse_enum::<MeetingStatus>(row, "status")?,
             audio_file_path: PathBuf::from(row.get::<_, String>("audio_file_path")?),
             audio_format: row.get("audio_format")?,
             audio_size_bytes: row.get("audio_size_bytes")?,
@@ -180,14 +196,14 @@ impl SqliteManager {
             },
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
-            sync_status: row.get::<_, String>("sync_status")?.into(),
+            sync_status: parse_enum::<SyncStatus>(row, "sync_status")?,
             meeting_type: row.get("meeting_type")?,
             location: row.get("location")?,
             participants: serde_json::from_str(&row.get::<_, String>("participants")?)
                 .unwrap_or_default(),
             language: row.get("language")?,
             topic: row.get("topic")?,
-            audio_source: row.get::<_, String>("audio_source")?.into(),
+            audio_source: parse_enum::<AudioSource>(row, "audio_source")?,
             stt_provider: row.get("stt_provider")?,
             llm_provider: row.get("llm_provider")?,
             prompt_template_used: row.get("prompt_template_used")?,
@@ -355,6 +371,40 @@ impl SqliteManager {
             row.get("key_encrypted")
         }).optional()?;
         Ok(key)
+    }
+
+    /// List all stored API keys in encrypted form (provider, ciphertext).
+    /// Used by the passphrase-change flow to re-encrypt every key.
+    pub fn list_api_keys_encrypted(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT provider, key_encrypted FROM api_keys")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row?);
+        }
+        Ok(keys)
+    }
+
+    /// Atomically apply the effects of a passphrase change: replace every API
+    /// key's ciphertext and rewrite the vault sentinel. A single transaction
+    /// guarantees either everything moves to the new key or nothing does.
+    pub fn apply_reencryption(&self, updates: &[(String, String)], vault_check_value: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (provider, key_encrypted) in updates {
+            tx.execute(
+                "UPDATE api_keys SET key_encrypted = ?2, updated_at = ?3 WHERE provider = ?1",
+                params![provider, key_encrypted, chrono::Utc::now().timestamp_millis()],
+            )?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO configuration (key, value, updated_at) VALUES (?1, ?2, ?3)",
+            params!["vault_check", vault_check_value, chrono::Utc::now().timestamp_millis()],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn save_prompt_template(&self, name: &str, content: &str, meeting_type: Option<&str>, is_custom: bool) -> Result<()> {

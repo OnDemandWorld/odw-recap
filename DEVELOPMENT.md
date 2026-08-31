@@ -3,7 +3,7 @@
 ## Project: Recap by ODW.ai
 
 **Repository:** https://github.com/OnDemandWorld/odw-recap  
-**Status:** Full review & refactor completed — end-to-end local pipeline wired (import → transcribe → summarize)  
+**Status:** Phase 2 (P0 sprint) completed — vault unlock flow, auth hardening, safe passphrase change, lossless enums  
 **Last Updated:** 2026-09-01
 
 > **See `IMPROVEMENT_PLAN.md` for the full list of fixes made in the 2026-09
@@ -111,14 +111,29 @@
 - [x] Import now creates a meeting record; data dir moved to platform-local dir
 - [x] Compiler warnings in project code: 150 → 0; unused dependencies removed
 
+#### Phase 2 — P0 Sprint (see IMPROVEMENT_PLAN.md §2.5)
+- [x] **Vault unlock flow**: no storage access until the vault is created (first
+      run) or unlocked; sentinel-based passphrase verification; setup/unlock
+      screens in the UI; Lock + Change-Passphrase controls in Settings; the
+      plaintext `.passphrase` file is gone (`RECAP_PASSPHRASE` env var remains
+      as an explicit headless/CI auto-unlock)
+- [x] **Safe passphrase change**: re-encrypts all API keys + sentinel in one
+      transaction; master key swapped only after commit
+- [x] **Team-server auth hardening**: fail-closed `JWT_SECRET`, 15-minute access
+      tokens, rotating revocable refresh tokens (stored as SHA-256 hashes in
+      Redis), `/auth/refresh` + `/auth/logout`, per-request user/role
+      re-validation, per-IP rate limiting on auth endpoints, audit log writes
+- [x] **Lossless enum parsing**: `TryFrom` for meeting/sync/audio-source enums;
+      unknown DB values error instead of silently changing state
+
 ---
 
 ## Test Status
 
 | Component | Tests | Status |
 |-----------|-------|--------|
-| Rust desktop backend | 16 | ✅ Passing |
-| Go team server | 9 | ✅ Passing |
+| Rust desktop backend | 23 | ✅ Passing |
+| Go team server | 15 functions / 17 cases | ✅ Passing |
 | Frontend (jest) | scaffolds excluded (`--passWithNoTests`) | ✅ Exits clean |
 | Desktop build | — | ✅ Compiles |
 | Team server build | — | ✅ Compiles |
@@ -194,8 +209,8 @@ go test ./...
 1. **Tauri 2.x upgrade deferred** due to scaffolding tooling availability; CSP is `null` until the migration.
 2. **Stub providers** (AssemblyAI, AWS Transcribe, Azure Speech, Google STT, Google Gemini, AWS Bedrock, Azure OpenAI, Llama.cpp, Whisper.cpp) require real API/FFI integration before production use. The OpenAI, Anthropic, Deepgram, and Ollama providers are real.
 3. **Audio capture** is implemented as a stub structure; real I/O requires `cpal` and platform-specific loopback devices. File import, watch folder, and HTTP upload (localhost-only) work.
-4. **Local encryption passphrase** is stored in a 0600 file (or `RECAP_PASSPHRASE` env var) until the real unlock/keychain flow lands (IMPROVEMENT_PLAN.md P0-1). Passphrase *change* is intentionally disabled until re-encryption exists (P0-4).
-5. **Team server**: `sync_queue` has no consumer worker yet; no rate limiting; default JWT secret still boots with a warning (all tracked in IMPROVEMENT_PLAN.md P0-2 / P1-1).
+4. **Local encryption** now uses a real unlock flow (first-run setup + unlock screen, sentinel verification, safe re-encrypting passphrase change). Remaining: optional OS-keychain auto-unlock and auto-lock timeout (IMPROVEMENT_PLAN.md P1+).
+5. **Team server**: auth is hardened (fail-closed secret, refresh rotation, rate limiting, audit writes), but `sync_queue` still has no consumer worker (IMPROVEMENT_PLAN.md P1-1).
 6. **Mobile companion app** and **iOS Shortcuts** are represented only as data types and sync contracts; no native mobile code exists yet.
 7. **E2E tests** are scaffolding only and require Playwright + built Tauri app to run.
 
