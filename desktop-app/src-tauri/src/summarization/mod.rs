@@ -3,12 +3,16 @@ pub mod llm_router;
 pub mod providers;
 pub mod rule_based;
 
+#[cfg(test)]
+mod rule_based_test;
+
 use crate::error::Result;
 use crate::storage::types::Summary;
 use std::path::Path;
 
 pub use llm_provider::{LLMProvider, SummarizationConfig, SummarizationResult};
 pub use llm_router::LLMRouter;
+pub use rule_based::RuleBasedSummarizer;
 
 /// Summarization manager that coordinates summarization across providers
 pub struct SummarizationManager {

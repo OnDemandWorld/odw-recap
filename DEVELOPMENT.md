@@ -97,10 +97,59 @@
 
 | Component | Tests | Status |
 |-----------|-------|--------|
-| Rust desktop backend | 7 | ✅ Passing |
-| Go team server | 3 | ✅ Passing |
+| Rust desktop backend | 15 | ✅ Passing |
+| Go team server | 6 test files (api / db / sync) | ✅ Passing |
+| Frontend (Jest: utils + command contract) | 19 | ✅ Passing |
 | Desktop build | — | ✅ Compiles |
-| Team server build | — | ✅ Compiles |
+| Team server build | — | ✅ Compiles (live smoke-tested against a real PostgreSQL) |
+
+Run everything with `./scripts/test-all.sh`.
+
+---
+
+## 2026-09-11 Full Review & Hardening Pass
+
+A full review/test/fix pass was performed. Highlights:
+
+### Desktop app (critical fixes)
+- **Frontend was dead on arrival**: `main.js` used bare ESM imports
+  (`@tauri-apps/api/...`) which cannot resolve without a bundler. The UI now
+  uses the injected `window.__TAURI__` global. A Jest command-contract test
+  guards every `invoke()` against the Rust `generate_handler!` list.
+- **End-to-end pipeline wired**: import → transcribe (OpenAI/Deepgram) →
+  summarize (OpenAI/Anthropic, offline rule-based fallback) → transcripts,
+  summaries, action items and decisions persisted and shown in the UI.
+  Local whisper.cpp/llama.cpp remain stubs and return an actionable error.
+- **Meetings are real now**: `list_meetings` returns rich summaries (title,
+  status, duration), detail view loads actual data, delete works, drag &
+  drop import works, watch folder auto-import works (emits
+  `meeting-imported`), HTTP upload server runs with a per-start random
+  **token** (URL shown in Settings).
+- **Security**: CSP set (`tauri.conf.json`), per-install random Argon2 salt
+  persisted to `salt.bin` (legacy zero-salt installs keep working with a
+  warning), all `innerHTML` rendering escaped, API keys saved encrypted via
+  real commands.
+- **Robustness**: removed runtime panics (sentence sort, multipart file
+  name, SQLite UUID parse now returns errors), Cargo package renamed to
+  `recap-desktop` v1.0.0.
+
+### Team server
+- **CORS**: credentials never allowed; explicit `ALLOWED_ORIGINS` env for
+  browser clients.
+- **JWT**: unset secret → random ephemeral secret (tokens reset on restart);
+  configured secrets must be ≥ 32 chars or startup fails.
+- **Login rate limiting** (10/min per IP+account, in-memory), 4 MiB JSON
+  body cap, register validation (email shape, 8–72 char passwords, duplicate
+  email → 409), `rows.Err()`/`RowsAffected` handling, Update/Delete TOCTOU
+  → 404, list endpoints paginated, JSON error responses everywhere,
+  `golang-jwt` upgraded to v5.2.2, `redis://` URLs supported.
+
+### Tests added
+- Go: rate limiter, register validation, throttled login, oversized body,
+  JSON auth errors, CORS, Redis URL parsing.
+- Rust: transcript/summary/action-item persistence, meeting delete, salt
+  persistence, template listing, rule-based summarizer.
+- JS: utils unit tests + frontend/backend command contract.
 
 ---
 

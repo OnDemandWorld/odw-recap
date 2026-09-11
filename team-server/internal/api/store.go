@@ -28,8 +28,9 @@ type MeetingStore interface {
 	// Get returns a meeting by id regardless of owner; ownership checks are
 	// performed by the caller. Returns ErrMeetingNotFound when absent.
 	Get(ctx context.Context, id uuid.UUID) (*models.Meeting, error)
-	// ListByOwner returns only the meetings owned by ownerID (tenant scope).
-	ListByOwner(ctx context.Context, ownerID uuid.UUID) ([]*models.Meeting, error)
+	// ListByOwner returns only the meetings owned by ownerID (tenant scope),
+	// newest first, with limit/offset pagination.
+	ListByOwner(ctx context.Context, ownerID uuid.UUID, limit, offset int) ([]*models.Meeting, error)
 	// Update mutates an existing meeting's editable fields.
 	Update(ctx context.Context, m *models.Meeting) error
 	// Delete removes a meeting by id.
@@ -73,10 +74,10 @@ func (s *dbMeetingStore) Get(ctx context.Context, id uuid.UUID) (*models.Meeting
 	return &m, nil
 }
 
-func (s *dbMeetingStore) ListByOwner(ctx context.Context, ownerID uuid.UUID) ([]*models.Meeting, error) {
+func (s *dbMeetingStore) ListByOwner(ctx context.Context, ownerID uuid.UUID, limit, offset int) ([]*models.Meeting, error) {
 	rows, err := s.database.DB().QueryContext(ctx,
-		"SELECT id, created_by, title, meeting_type, language, status, created_at, updated_at FROM meetings WHERE created_by = $1 ORDER BY created_at DESC LIMIT 100",
-		ownerID,
+		"SELECT id, created_by, title, meeting_type, language, status, created_at, updated_at FROM meetings WHERE created_by = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+		ownerID, limit, offset,
 	)
 	if err != nil {
 		return nil, err
@@ -88,25 +89,42 @@ func (s *dbMeetingStore) ListByOwner(ctx context.Context, ownerID uuid.UUID) ([]
 		var m models.Meeting
 		var createdBy *uuid.UUID
 		if err := rows.Scan(&m.ID, &createdBy, &m.Title, &m.MeetingType, &m.Language, &m.Status, &m.CreatedAt, &m.UpdatedAt); err != nil {
-			continue
+			return nil, err
 		}
 		m.CreatedBy = createdBy
 		meetings = append(meetings, &m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return meetings, nil
 }
 
 func (s *dbMeetingStore) Update(ctx context.Context, m *models.Meeting) error {
-	_, err := s.database.DB().ExecContext(ctx,
+	res, err := s.database.DB().ExecContext(ctx,
 		"UPDATE meetings SET title = $1, meeting_type = $2, language = $3, updated_at = $4 WHERE id = $5",
 		m.Title, m.MeetingType, m.Language, m.UpdatedAt, m.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		// The row vanished between the handler's Get and this Update
+		// (TOCTOU); surface it instead of reporting success on a no-op.
+		return ErrMeetingNotFound
+	}
+	return nil
 }
 
 func (s *dbMeetingStore) Delete(ctx context.Context, id uuid.UUID) error {
-	_, err := s.database.DB().ExecContext(ctx, "DELETE FROM meetings WHERE id = $1", id)
-	return err
+	res, err := s.database.DB().ExecContext(ctx, "DELETE FROM meetings WHERE id = $1", id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrMeetingNotFound
+	}
+	return nil
 }
 
 // dbAuditLogger is the PostgreSQL-backed AuditLogger. Writes are best-effort:

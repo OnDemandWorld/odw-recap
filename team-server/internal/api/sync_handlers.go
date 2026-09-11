@@ -36,7 +36,7 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req SyncRequest
-	if err := parseJSON(r, &req); err != nil {
+	if err := parseJSON(w, r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}

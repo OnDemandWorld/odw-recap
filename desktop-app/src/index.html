@@ -6,7 +6,8 @@
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ODW Recap — Meeting Intelligence</title>
-    <script type="module" src="/main.js" defer></script>
+    <script src="utils.js"></script>
+    <script src="main.js" defer></script>
   </head>
 
   <body>
@@ -55,9 +56,9 @@
               <h3>Import Options</h3>
               <ul>
                 <li><strong>File Browser:</strong> Click the button above to select an audio file</li>
-                <li><strong>Drag & Drop:</strong> Drag audio files into the application window</li>
-                <li><strong>Watch Folder:</strong> Configure a folder to automatically import new recordings</li>
-                <li><strong>HTTP Upload:</strong> Transfer from smartphone via local network</li>
+                <li><strong>Drag &amp; Drop:</strong> Drag audio files into the application window</li>
+                <li><strong>Watch Folder:</strong> Pick a folder in Settings — new recordings there import automatically</li>
+                <li><strong>Phone Upload:</strong> Enable the HTTP upload server in Settings and open the shown URL on your phone</li>
               </ul>
             </div>
           </div>
@@ -73,13 +74,17 @@
               <h3>Audio Input</h3>
               <div class="setting-item">
                 <label>Watch Folder</label>
-                <input type="text" id="watch-folder-path" placeholder="/path/to/watch/folder" />
-                <button class="btn-secondary">Browse</button>
+                <input type="text" id="watch-folder-path" placeholder="/path/to/recordings" readonly />
+                <button id="watch-folder-browse" class="btn-secondary">Choose Folder…</button>
+                <button id="watch-folder-stop" class="btn-secondary">Stop</button>
               </div>
               <div class="setting-item">
                 <label>HTTP Upload Server</label>
                 <input type="checkbox" id="http-server-enabled" />
-                <span>Enable</span>
+                <span>Enable (upload from your phone over Wi-Fi)</span>
+              </div>
+              <div class="setting-item">
+                <p id="http-server-url" class="placeholder-text"></p>
               </div>
             </div>
 
@@ -117,17 +122,21 @@
 
             <div class="settings-group">
               <h3>API Keys</h3>
+              <p class="placeholder-text">Keys are stored encrypted on this device only. Needed for cloud transcription (OpenAI / Deepgram) and cloud summaries (OpenAI / Anthropic).</p>
               <div class="setting-item">
                 <label>OpenAI API Key</label>
                 <input type="password" id="openai-api-key" placeholder="sk-..." />
+                <span class="key-status" aria-live="polite"></span>
               </div>
               <div class="setting-item">
                 <label>Anthropic API Key</label>
                 <input type="password" id="anthropic-api-key" placeholder="sk-ant-..." />
+                <span class="key-status" aria-live="polite"></span>
               </div>
               <div class="setting-item">
                 <label>Deepgram API Key</label>
                 <input type="password" id="deepgram-api-key" placeholder="..." />
+                <span class="key-status" aria-live="polite"></span>
               </div>
               <div class="setting-item">
                 <button id="save-api-keys-btn" class="btn-primary">Save API Keys</button>
@@ -137,10 +146,18 @@
             <div class="settings-group">
               <h3>Prompt Templates</h3>
               <div class="setting-item">
-                <button id="create-template-btn" class="btn-secondary">Create New Template</button>
+                <label>Template Name</label>
+                <input type="text" id="template-name" placeholder="Weekly standup summary" />
+              </div>
+              <div class="setting-item">
+                <label>Template Content</label>
+                <textarea id="template-content" rows="4" placeholder="Summarize this meeting about {{topic}}. Include decisions and action items for {{participants}}."></textarea>
+              </div>
+              <div class="setting-item">
+                <button id="save-template-btn" class="btn-secondary">Save Template</button>
               </div>
               <div class="template-list" id="template-list">
-                <p class="placeholder-text">Default templates will be listed here...</p>
+                <p class="placeholder-text">Loading templates…</p>
               </div>
             </div>
           </div>

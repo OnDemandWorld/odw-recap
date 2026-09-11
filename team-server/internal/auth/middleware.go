@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/ondemandworld/recap-team-server/internal/models"
@@ -16,23 +17,29 @@ const userContextKey contextKey = "user"
 func Middleware(jwtManager *JWTManager) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
+			respondJSONError := func(message string, status int) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"error":` + strconv.Quote(message) + `}`))
+			}
+
+			authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 			if authHeader == "" {
-				http.Error(w, "Authorization header required", http.StatusUnauthorized)
+				respondJSONError("Authorization header required", http.StatusUnauthorized)
 				return
 			}
 
-			// Extract token from "Bearer <token>"
-			parts := strings.Split(authHeader, " ")
-			if len(parts) != 2 || parts[0] != "Bearer" {
-				http.Error(w, "Invalid authorization header format", http.StatusUnauthorized)
+			// Extract token from "Bearer <token>" (any whitespace between
+			// scheme and token, and the token itself, may not contain spaces).
+			scheme, tokenString, found := strings.Cut(authHeader, " ")
+			if !found || scheme != "Bearer" || strings.TrimSpace(tokenString) == "" {
+				respondJSONError("Invalid authorization header format", http.StatusUnauthorized)
 				return
 			}
 
-			tokenString := parts[1]
-			claims, err := jwtManager.ValidateToken(tokenString)
+			claims, err := jwtManager.ValidateToken(strings.TrimSpace(tokenString))
 			if err != nil {
-				http.Error(w, "Invalid token", http.StatusUnauthorized)
+				respondJSONError("Invalid token", http.StatusUnauthorized)
 				return
 			}
 
@@ -61,9 +68,15 @@ func GetUserFromContext(ctx context.Context) *models.User {
 func RequireRole(roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			respondJSONError := func(message string, status int) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"error":` + strconv.Quote(message) + `}`))
+			}
+
 			user := GetUserFromContext(r.Context())
 			if user == nil {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				respondJSONError("Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
@@ -76,11 +89,11 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 			}
 
 			if !hasRole {
-				http.Error(w, "Forbidden", http.StatusForbidden)
+				respondJSONError("Forbidden", http.StatusForbidden)
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(r.Context()))
+			next.ServeHTTP(w, r)
 		})
 	}
 }

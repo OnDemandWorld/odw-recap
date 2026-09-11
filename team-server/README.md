@@ -35,8 +35,9 @@ team-server/
 ```bash
 PORT=8080
 DATABASE_URL=postgres://user:password@localhost:5432/recap?sslmode=disable
-REDIS_URL=localhost:6379
-JWT_SECRET=your-secret-key
+REDIS_URL=localhost:6379            # bare host:port or redis://[:password@]host:port[/db]
+JWT_SECRET=your-secret-key          # required in production; unset = random ephemeral secret
+ALLOWED_ORIGINS=                    # optional, comma-separated CORS origins for browser clients
 
 # Cross-product sync (Recap -> Vault / Loop)
 VAULT_API_URL=http://localhost:8765
@@ -44,6 +45,15 @@ LOOP_API_URL=http://localhost:3000
 LOOP_WEBHOOK_TRIGGER_ID=            # optional; when empty, Loop triggering is skipped
 LOOP_WEBHOOK_SECRET=                # optional; HMAC-SHA256 shared secret for the Loop webhook
 ```
+
+**JWT_SECRET policy:** when unset, the server starts with a random ephemeral
+secret and all tokens become invalid on every restart. An explicitly
+configured secret must be at least 32 characters or the server refuses to
+start.
+
+**Security notes:** JSON request bodies are capped at 4 MiB; login attempts
+are rate-limited (10 per minute per client IP + account); CORS never allows
+credentials.
 
 ## Running Locally
 

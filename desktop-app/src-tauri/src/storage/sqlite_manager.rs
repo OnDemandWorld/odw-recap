@@ -129,8 +129,20 @@ impl SqliteManager {
     }
 
     fn row_to_meeting(row: &rusqlite::Row) -> rusqlite::Result<Meeting> {
+        // A stored UUID that fails to parse means the database was corrupted
+        // or tampered with — surface an error instead of silently swapping in
+        // a random id (which would orphan the row's transcripts/summaries).
+        let id_str: String = row.get("id")?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                format!("invalid meeting id {:?}: {}", id_str, e).into(),
+            )
+        })?;
+
         Ok(Meeting {
-            id: Uuid::parse_str(&row.get::<_, String>("id")?).unwrap_or_else(|_| Uuid::new_v4()),
+            id,
             title: row.get("title")?,
             started_at: row.get("started_at")?,
             ended_at: row.get("ended_at")?,
@@ -170,10 +182,15 @@ impl SqliteManager {
 
         let limit_str = limit.to_string();
         let results = stmt.query_map([query, &limit_str], |row| {
-            Ok((
-                Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::new_v4()),
-                row.get::<_, String>(1)?,
-            ))
+            let id_str: String = row.get(0)?;
+            let id = Uuid::parse_str(&id_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    format!("invalid meeting id {:?}: {}", id_str, e).into(),
+                )
+            })?;
+            Ok((id, row.get::<_, String>(1)?))
         })?;
 
         let mut output = Vec::new();
@@ -233,6 +250,173 @@ impl SqliteManager {
             params![key, value, chrono::Utc::now().timestamp_millis()],
         )?;
         Ok(())
+    }
+
+    pub fn delete_meeting(&self, id: Uuid) -> Result<()> {
+        self.conn.execute("DELETE FROM meetings WHERE id = ?1", params![id.to_string()])?;
+        Ok(())
+    }
+
+    // --- Transcript segments -------------------------------------------------
+
+    /// Replace all transcript segments for a meeting. Runs in one transaction
+    /// so a crash cannot leave the meeting with a half-written transcript.
+    pub fn save_transcript_segments(&self, meeting_id: Uuid, segments: &[TranscriptSegment]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM transcript_segments WHERE meeting_id = ?1", params![meeting_id.to_string()])?;
+        for seg in segments {
+            tx.execute(
+                "INSERT INTO transcript_segments (meeting_id, start_ms, end_ms, text, speaker_id, confidence, is_final, version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    meeting_id.to_string(),
+                    seg.start_ms,
+                    seg.end_ms,
+                    seg.text,
+                    seg.speaker_id,
+                    seg.confidence,
+                    if seg.is_final { 1 } else { 0 },
+                    seg.version,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_transcript_segments(&self, meeting_id: Uuid) -> Result<Vec<TranscriptSegment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, start_ms, end_ms, text, speaker_id, confidence, is_final, version
+             FROM transcript_segments WHERE meeting_id = ?1 ORDER BY start_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![meeting_id.to_string()], |row| {
+            Ok(TranscriptSegment {
+                id: row.get(0)?,
+                meeting_id,
+                start_ms: row.get(1)?,
+                end_ms: row.get(2)?,
+                text: row.get(3)?,
+                speaker_id: row.get(4)?,
+                confidence: row.get(5)?,
+                is_final: row.get::<_, i64>(6)? != 0,
+                version: row.get(7)?,
+            })
+        })?;
+
+        let mut segments = Vec::new();
+        for row in rows {
+            segments.push(row?);
+        }
+        Ok(segments)
+    }
+
+    // --- Summaries -----------------------------------------------------------
+
+    pub fn save_summary(&self, meeting_id: Uuid, content: &str, generation_mode: &str, model_used: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO summaries (meeting_id, content, generation_mode, model_used, created_at, updated_at, user_edited)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0)",
+            params![meeting_id.to_string(), content, generation_mode, model_used, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_latest_summary(&self, meeting_id: Uuid) -> Result<Option<Summary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, generation_mode, model_used, created_at, updated_at, user_edited
+             FROM summaries WHERE meeting_id = ?1 ORDER BY id DESC LIMIT 1",
+        )?;
+        let summary = stmt.query_row(params![meeting_id.to_string()], |row| {
+            Ok(Summary {
+                id: row.get(0)?,
+                meeting_id,
+                content: row.get(1)?,
+                generation_mode: row.get(2)?,
+                model_used: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                user_edited: row.get::<_, i64>(6)? != 0,
+            })
+        }).optional()?;
+        Ok(summary)
+    }
+
+    // --- Action items / decisions --------------------------------------------
+
+    /// Replace the generated action items for a meeting.
+    pub fn save_action_items(&self, meeting_id: Uuid, items: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM action_items WHERE meeting_id = ?1", params![meeting_id.to_string()])?;
+        let now = chrono::Utc::now().timestamp_millis();
+        for item in items {
+            tx.execute(
+                "INSERT INTO action_items (id, meeting_id, description, status, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'pending', ?4, ?4)",
+                params![Uuid::new_v4().to_string(), meeting_id.to_string(), item, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_action_items(&self, meeting_id: Uuid) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT description FROM action_items WHERE meeting_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![meeting_id.to_string()], |row| row.get::<_, String>(0))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// Replace the generated decisions for a meeting.
+    pub fn save_decisions(&self, meeting_id: Uuid, decisions: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM decisions WHERE meeting_id = ?1", params![meeting_id.to_string()])?;
+        let now = chrono::Utc::now().timestamp_millis();
+        for decision in decisions {
+            tx.execute(
+                "INSERT INTO decisions (id, meeting_id, description, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![Uuid::new_v4().to_string(), meeting_id.to_string(), decision, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_decisions(&self, meeting_id: Uuid) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT description FROM decisions WHERE meeting_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![meeting_id.to_string()], |row| row.get::<_, String>(0))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    // --- Prompt templates ------------------------------------------------------
+
+    pub fn list_prompt_templates(&self) -> Result<Vec<(String, Option<String>, bool)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, meeting_type, is_custom FROM prompt_templates ORDER BY is_custom ASC, name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)? != 0,
+            ))
+        })?;
+        let mut templates = Vec::new();
+        for row in rows {
+            templates.push(row?);
+        }
+        Ok(templates)
     }
 }
 

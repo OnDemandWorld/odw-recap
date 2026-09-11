@@ -21,9 +21,54 @@ pub struct StorageManager {
     data_dir: PathBuf,
 }
 
+// Filename holding the persisted random Argon2 salt next to the database.
+const SALT_FILE: &str = "salt.bin";
+
+/// Load (or create) the per-installation random salt.
+///
+/// New installations get a random 32-byte salt persisted to
+/// `<data_dir>/salt.bin` so the same passphrase keeps deriving the same key
+/// across restarts. Existing installations created before salts were
+/// persisted used the historical all-zero salt; they keep working (with a
+/// warning) instead of silently losing access to already-encrypted API keys.
+fn load_or_create_salt(data_dir: &Path) -> Result<[u8; 32]> {
+    let salt_path = data_dir.join(SALT_FILE);
+    if salt_path.exists() {
+        let bytes = std::fs::read(&salt_path)?;
+        if bytes.len() == 32 {
+            let mut salt = [0u8; 32];
+            salt.copy_from_slice(&bytes);
+            return Ok(salt);
+        }
+        return Err(RecapError::Encryption(format!(
+            "Corrupted salt file at {}: expected 32 bytes, found {}",
+            salt_path.display(),
+            bytes.len()
+        )));
+    }
+
+    // No salt file — decide between fresh install (new random salt) and
+    // legacy install (historical zero salt). A pre-existing database means
+    // legacy.
+    let legacy_db = data_dir.join("recap.db");
+    if legacy_db.exists() {
+        eprintln!(
+            "WARNING: no salt file found but existing data is present; using the legacy \
+             zero salt. Re-save your API keys to migrate them to per-install random salt \
+             encryption."
+        );
+        return Ok([0u8; 32]);
+    }
+
+    let salt = EncryptionManager::generate_salt();
+    std::fs::write(&salt_path, salt)?;
+    Ok(salt)
+}
+
 impl StorageManager {
     pub fn new(data_dir: PathBuf, passphrase: &str) -> Result<Self> {
-        let encryption = EncryptionManager::new();
+        let salt = load_or_create_salt(&data_dir)?;
+        let encryption = EncryptionManager::with_salt(salt);
         encryption.unlock(passphrase)?;
 
         let file_store = FileStore::new(data_dir.clone(), encryption.clone());
@@ -98,8 +143,49 @@ impl StorageManager {
         self.db.list_meetings(limit, offset)
     }
 
+    pub fn delete_meeting(&self, id: Uuid) -> Result<()> {
+        self.db.delete_meeting(id)
+    }
+
     pub fn search_transcripts(&self, query: &str, limit: i64) -> Result<Vec<(Uuid, String)>> {
         self.db.search_transcripts(query, limit)
+    }
+
+    // Transcript / summary / action item / decision operations
+    pub fn save_transcript_segments(&self, meeting_id: Uuid, segments: &[TranscriptSegment]) -> Result<()> {
+        self.db.save_transcript_segments(meeting_id, segments)
+    }
+
+    pub fn get_transcript_segments(&self, meeting_id: Uuid) -> Result<Vec<TranscriptSegment>> {
+        self.db.get_transcript_segments(meeting_id)
+    }
+
+    pub fn save_summary(&self, meeting_id: Uuid, content: &str, generation_mode: &str, model_used: Option<&str>) -> Result<()> {
+        self.db.save_summary(meeting_id, content, generation_mode, model_used)
+    }
+
+    pub fn get_latest_summary(&self, meeting_id: Uuid) -> Result<Option<Summary>> {
+        self.db.get_latest_summary(meeting_id)
+    }
+
+    pub fn save_action_items(&self, meeting_id: Uuid, items: &[String]) -> Result<()> {
+        self.db.save_action_items(meeting_id, items)
+    }
+
+    pub fn get_action_items(&self, meeting_id: Uuid) -> Result<Vec<String>> {
+        self.db.get_action_items(meeting_id)
+    }
+
+    pub fn save_decisions(&self, meeting_id: Uuid, decisions: &[String]) -> Result<()> {
+        self.db.save_decisions(meeting_id, decisions)
+    }
+
+    pub fn get_decisions(&self, meeting_id: Uuid) -> Result<Vec<String>> {
+        self.db.get_decisions(meeting_id)
+    }
+
+    pub fn list_prompt_templates(&self) -> Result<Vec<(String, Option<String>, bool)>> {
+        self.db.list_prompt_templates()
     }
 
     // API key operations

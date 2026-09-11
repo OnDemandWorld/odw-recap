@@ -11,8 +11,10 @@ cd ../..
 
 # Build Tauri frontend
 echo "Building Tauri frontend..."
+cd desktop-app
 npm install
 npm run tauri build
+cd ..
 
 # Build Go team server
 echo "Building team server..."

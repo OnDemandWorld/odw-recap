@@ -38,11 +38,13 @@ before Recap can be sold as an on-device Otter/Fireflies/Fathom alternative.
    Real-time partial/final segments require a streaming decoder and incremental
    UI updates.
 
-5. **Wiring the pipeline to the UI.**
-   The capture → transcribe → diarize → summarize → action-items pipeline is not
-   connected end-to-end to the Tauri frontend. The cloud provider adapters
-   (AssemblyAI, Azure, Google, AWS, Deepgram, OpenAI Whisper, Bedrock, etc.) are
-   also stubs returning canned text.
+5. **Pipeline wiring is PARTIALLY done (2026-09-11).**
+   The desktop app now runs import → transcribe → summarize → persist → UI
+   end-to-end for **cloud providers only**: STT via OpenAI Whisper API and
+   Deepgram, summaries via OpenAI/Anthropic with an offline rule-based
+   fallback. The remaining cloud adapters (AssemblyAI, Azure, Google, AWS)
+   and the local engines (whisper.cpp, llama.cpp) are still stubs; selecting
+   one returns an actionable error instead of fake output.
 
 6. **Code signing, notarization, and auto-update.**
    The Tauri bundle is not code-signed or notarized (macOS Gatekeeper /
@@ -51,14 +53,16 @@ before Recap can be sold as an on-device Otter/Fireflies/Fathom alternative.
 
 ## Security note (desktop app)
 
-The storage encryption passphrase is now read from the
+The storage encryption passphrase is read from the
 `RECAP_ENCRYPTION_PASSPHRASE` environment variable with **no hardcoded
 default**. When unset, the app logs a warning and falls back to an empty
 passphrase — a documented development-only behavior, **not** a production
 default. Production builds must set the variable (and ideally derive the key
-from an OS keychain rather than a plain env var). This Rust edit was made
-conservatively and **has not been compile-verified** (no `cargo` toolchain in
-this environment).
+from an OS keychain rather than a plain env var). Since 2026-09-11 the
+Argon2 salt is random per installation and persisted to
+`~/RecapData/salt.bin` (pre-existing zero-salt installs keep working via a
+legacy fallback). The desktop app has been compile-verified and its test
+suite (15 Rust tests) passes.
 
 ## What IS working (team-server, Go)
 

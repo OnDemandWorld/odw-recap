@@ -1,10 +1,10 @@
 [package]
-name = "tauri-app"
-version = "0.0.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+name = "recap-desktop"
+version = "1.0.0"
+description = "ODW Recap — private, on-device meeting intelligence"
+authors = ["ODW.ai"]
+license = "MIT"
+repository = "https://github.com/OnDemandWorld/odw-recap"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

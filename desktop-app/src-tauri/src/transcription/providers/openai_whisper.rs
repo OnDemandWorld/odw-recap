@@ -47,8 +47,7 @@ impl OpenAIWhisperProvider {
 }
 
 #[async_trait]
-impl STTProvider for OpenAIWhisperProvider {
-    fn name(&self) -> &str {
+impl STTProvider for OpenAIWhisperProvider {    fn name(&self) -> &str {
         "openai_whisper"
     }
 
@@ -78,9 +77,14 @@ impl STTProvider for OpenAIWhisperProvider {
         // Read audio file
         let audio_data = tokio::fs::read(audio_path).await?;
 
-        // Create multipart form
+        // Create multipart form. The file name is cosmetic for the API but a
+        // path with no file component (e.g. "/") must not panic.
+        let file_name = audio_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "audio.wav".to_string());
         let part = reqwest::multipart::Part::bytes(audio_data)
-            .file_name(audio_path.file_name().unwrap().to_string_lossy().to_string())
+            .file_name(file_name)
             .mime_str("audio/mpeg")
             .map_err(|e| RecapError::Transcription(e.to_string()))?;
 

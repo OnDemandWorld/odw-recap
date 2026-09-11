@@ -44,17 +44,30 @@ func (f *fakeMeetingStore) Get(_ context.Context, id uuid.UUID) (*models.Meeting
 	return &cp, nil
 }
 
-func (f *fakeMeetingStore) ListByOwner(_ context.Context, ownerID uuid.UUID) ([]*models.Meeting, error) {
+func (f *fakeMeetingStore) ListByOwner(_ context.Context, ownerID uuid.UUID, limit, offset int) ([]*models.Meeting, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]*models.Meeting, 0)
+	owned := make([]*models.Meeting, 0)
 	for _, m := range f.meetings {
 		if m.CreatedBy != nil && *m.CreatedBy == ownerID {
 			cp := *m
-			out = append(out, &cp)
+			owned = append(owned, &cp)
 		}
 	}
-	return out, nil
+	// Newest first, matching the PostgreSQL store's ORDER BY created_at DESC.
+	for i := 1; i < len(owned); i++ {
+		for j := i; j > 0 && owned[j].CreatedAt.After(owned[j-1].CreatedAt); j-- {
+			owned[j], owned[j-1] = owned[j-1], owned[j]
+		}
+	}
+	if offset > len(owned) {
+		offset = len(owned)
+	}
+	owned = owned[offset:]
+	if limit < len(owned) {
+		owned = owned[:limit]
+	}
+	return owned, nil
 }
 
 func (f *fakeMeetingStore) Update(_ context.Context, m *models.Meeting) error {

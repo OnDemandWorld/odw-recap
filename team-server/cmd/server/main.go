@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,8 +36,31 @@ func main() {
 
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
-		jwtSecret = "change-this-secret-in-production"
-		log.Println("WARNING: Using default JWT secret. Set JWT_SECRET environment variable!")
+		// No configured secret: use a random ephemeral one instead of a
+		// publicly-known constant. Tokens issued before a restart stop
+		// working, which is annoying but far safer than a forgeable secret.
+		buf := make([]byte, 32)
+		if _, err := rand.Read(buf); err != nil {
+			log.Fatalf("Failed to generate ephemeral JWT secret: %v", err)
+		}
+		jwtSecret = hex.EncodeToString(buf)
+		log.Println("WARNING: JWT_SECRET not set; using a random ephemeral secret. " +
+			"All tokens become invalid on restart. Set JWT_SECRET in production.")
+	} else if len(jwtSecret) < 32 {
+		// An explicit but short secret is brute-forceable; refuse rather than
+		// run with a false sense of security.
+		log.Fatalf("JWT_SECRET must be at least 32 characters (current length: %d)", len(jwtSecret))
+	}
+
+	// CORS allowlist for browser-based clients. Authentication itself is
+	// bearer-token based, so this only governs which web origins may call the
+	// API from a browser. Comma-separated, e.g. "https://recap.example.com".
+	allowedOrigins := strings.Split(strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")), ",")
+	origins := make([]string, 0, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
 	}
 
 	// Cross-product sync configuration (Recap -> Vault / Loop)
@@ -65,6 +91,9 @@ func main() {
 
 	// Initialize API server
 	server := api.NewServer(database, redis, jwtSecret)
+	if len(origins) > 0 {
+		server.SetAllowedOrigins(origins)
+	}
 
 	// Wire the cross-product sync forwarder (Recap -> Vault / Loop)
 	syncForwarder := odwsync.NewForwarder(&http.Client{Timeout: 30 * time.Second}, odwsync.Config{

@@ -16,12 +16,13 @@ impl RuleBasedSummarizer {
         let word_freq = self.calculate_word_frequency(&sentences);
         let sentence_scores = self.score_sentences(&sentences, &word_freq);
 
-        // Select top sentences
+        // Select top sentences (total_cmp avoids the NaN panic that
+        // partial_cmp().unwrap() would hit on non-finite scores).
         let mut scored_sentences: Vec<(usize, f32)> = sentence_scores
             .into_iter()
             .enumerate()
             .collect();
-        scored_sentences.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored_sentences.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         let num_sentences = (config.max_length / 20).max(1).min(sentences.len());
         let mut selected_indices: Vec<usize> = scored_sentences

@@ -34,11 +34,11 @@ func TestAnnotateSSLError(t *testing.T) {
 	otherErr := errors.New("connection refused")
 
 	tests := []struct {
-		name      string
-		err       error
-		dsn       string
-		wantNil   bool
-		wantHint  bool
+		name       string
+		err        error
+		dsn        string
+		wantNil    bool
+		wantHint   bool
 		wantUnwrap bool
 	}{
 		{"nil error", nil, "postgres://x", true, false, false},
@@ -70,4 +70,27 @@ func TestAnnotateSSLError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewRedisAcceptsBareAddrAndURL(t *testing.T) {
+	// Bare host:port is passed through unchanged.
+	r := NewRedis("localhost:6379")
+	if got := r.Addr(); got != "localhost:6379" {
+		t.Errorf("bare addr: want localhost:6379, got %q", got)
+	}
+	r.Close()
+
+	// redis:// URL form is parsed into host/port.
+	r2 := NewRedis("redis://:s3cret@redis.example.com:6380/2")
+	opts := r2.client.Options()
+	if opts.Addr != "redis.example.com:6380" {
+		t.Errorf("url form: want redis.example.com:6380, got %q", opts.Addr)
+	}
+	if opts.Password != "s3cret" {
+		t.Errorf("url form: password not parsed, got %q", opts.Password)
+	}
+	if opts.DB != 2 {
+		t.Errorf("url form: db not parsed, got %d", opts.DB)
+	}
+	r2.Close()
 }

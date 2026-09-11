@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,6 +26,21 @@ func (s *Server) canAccess(user *models.User, meeting *models.Meeting) bool {
 	return meeting.CreatedBy != nil && *meeting.CreatedBy == user.ID
 }
 
+// listMeetingsPagination bounds and normalizes ?limit / ?offset.
+func listMeetingsPagination(r *http.Request) (limit, offset int) {
+	limit, offset = 100, 0
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
+		limit = v
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
+		offset = v
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	return limit, offset
+}
+
 func (s *Server) listMeetingsHandler(w http.ResponseWriter, r *http.Request) {
 	user := auth.GetUserFromContext(r.Context())
 	if user == nil {
@@ -37,7 +53,8 @@ func (s *Server) listMeetingsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant isolation: a user only ever sees their own meetings here.
-	owned, err := s.meetings.ListByOwner(r.Context(), user.ID)
+	limit, offset := listMeetingsPagination(r)
+	owned, err := s.meetings.ListByOwner(r.Context(), user.ID, limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to list meetings")
 		return
@@ -71,7 +88,7 @@ func (s *Server) createMeetingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req models.Meeting
-	if err := parseJSON(r, &req); err != nil {
+	if err := parseJSON(w, r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -151,7 +168,7 @@ func (s *Server) updateMeetingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req models.Meeting
-	if err := parseJSON(r, &req); err != nil {
+	if err := parseJSON(w, r, &req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -177,6 +194,10 @@ func (s *Server) updateMeetingHandler(w http.ResponseWriter, r *http.Request) {
 	meeting.UpdatedAt = time.Now()
 
 	if err := s.meetings.Update(r.Context(), meeting); err != nil {
+		if errors.Is(err, ErrMeetingNotFound) {
+			respondError(w, http.StatusNotFound, "Meeting not found")
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "Failed to update meeting")
 		return
 	}
@@ -219,6 +240,10 @@ func (s *Server) deleteMeetingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.meetings.Delete(r.Context(), meetingID); err != nil {
+		if errors.Is(err, ErrMeetingNotFound) {
+			respondError(w, http.StatusNotFound, "Meeting not found")
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "Failed to delete meeting")
 		return
 	}
