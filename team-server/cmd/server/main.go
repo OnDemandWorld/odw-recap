@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -17,7 +18,32 @@ import (
 	odwsync "github.com/ondemandworld/recap-team-server/internal/sync"
 )
 
+// ensureLoopbackBypassesProxy keeps loopback sibling calls (Vault/Loop) out of
+// HTTP proxies: with HTTP_PROXY set and NO_PROXY missing 127.0.0.1/localhost,
+// Go's ProxyFromEnvironment routes internal calls through the proxy.
+func ensureLoopbackBypassesProxy() {
+	for _, key := range []string{"NO_PROXY", "no_proxy"} {
+		parts := map[string]bool{}
+		for _, p := range strings.Split(os.Getenv(key), ",") {
+			if t := strings.TrimSpace(p); t != "" {
+				parts[t] = true
+			}
+		}
+		if !parts["localhost"] || !parts["127.0.0.1"] {
+			parts["localhost"] = true
+			parts["127.0.0.1"] = true
+			list := make([]string, 0, len(parts))
+			for k := range parts {
+				list = append(list, k)
+			}
+			sort.Strings(list)
+			os.Setenv(key, strings.Join(list, ","))
+		}
+	}
+}
+
 func main() {
+	ensureLoopbackBypassesProxy()
 	// Load configuration
 	port := os.Getenv("PORT")
 	if port == "" {
