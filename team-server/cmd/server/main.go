@@ -75,8 +75,13 @@ func main() {
 	}
 
 	// Optional: when LOOP_WEBHOOK_TRIGGER_ID is unset, Loop triggering is skipped.
+	// That makes the Recap→Loop chain a silent no-op while /sync still reports
+	// success — warn loudly so operators know the integration is dormant.
 	loopTriggerID := os.Getenv("LOOP_WEBHOOK_TRIGGER_ID")
 	loopWebhookSecret := os.Getenv("LOOP_WEBHOOK_SECRET")
+	if loopTriggerID == "" {
+		log.Printf("WARNING: LOOP_WEBHOOK_TRIGGER_ID is not set — meeting action items will NOT be forwarded to Loop workflows. Create a webhook trigger in Loop and set LOOP_WEBHOOK_TRIGGER_ID + LOOP_WEBHOOK_SECRET to activate the Recap→Loop chain.")
+	}
 
 	// Initialize database
 	database, err := db.NewDatabase(dsn)

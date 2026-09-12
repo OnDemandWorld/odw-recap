@@ -539,12 +539,12 @@ body {
   border-radius: 10px;
   font-size: 12px;
   font-weight: 600;
-  background: #e5e7eb;
-  color: #374151;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
 }
-.status-completed { background: #d1fae5; color: #065f46; }
-.status-processing, .status-recording { background: #dbeafe; color: #1e40af; }
-.status-failed { background: #fee2e2; color: #991b1b; }
+.status-completed { background: rgba(31, 122, 77, 0.14); color: var(--success); }
+.status-processing, .status-recording { background: var(--accent-subtle); color: var(--accent-hover); }
+.status-failed { background: rgba(220, 75, 92, 0.14); color: var(--error); }
 
 /* --- Detail view --- */
 .detail-actions { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -564,8 +564,50 @@ body {
   padding: 1px 6px;
   font-size: 11px;
   border-radius: 8px;
-  background: #dbeafe;
-  color: #1e40af;
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
 }
-.badge-muted { background: #f3f4f6; color: #6b7280; }
+.badge-muted { background: var(--bg-secondary); color: var(--text-tertiary); }
 #http-server-url code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; word-break: break-all; }
+
+/* ── Dark mode — suite-wide policy: follow the OS (Vault tokens, data-theme parity) ── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-app: #14110F;
+    --bg-primary: #1C1815;
+    --bg-secondary: #262019;
+    --bg-tertiary: #2E2721;
+    --text-primary: #F6F2EC;
+    --text-secondary: #D6CFC4;
+    --text-tertiary: #A8A096;
+    --text-disabled: #6A645C;
+    --border-subtle: rgba(246, 242, 236, 0.08);
+    --border-default: #3A322B;
+    --border-strong: rgba(246, 242, 236, 0.24);
+    --accent-subtle: rgba(255, 90, 31, 0.16);
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 10px -2px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Accessibility: visible keyboard focus everywhere (parity with Vault) */
+button:focus-visible,
+a:focus-visible,
+.nav-btn:focus-visible,
+.action-btn:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Respect reduced-motion (parity with Vault / Loop canvas) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

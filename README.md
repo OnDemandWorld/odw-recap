@@ -14,8 +14,8 @@ No cloud bot silently joins your calls. No transcripts sit on a vendor's servers
 
 ## Key Features
 
-- **On-device transcription**: Uses Whisper-family models locally via whisper.cpp
-- **Local AI summarization**: Generates summaries, action items, and decisions with local LLMs
+- **On-device transcription**: Whisper-family models run locally via whisper.cpp — ⚠️ the local engine is a stub in this release; end-to-end transcription currently requires a cloud provider (OpenAI/Deepgram) or a remote Ollama. See [team-server/KNOWN_LIMITATIONS.md](team-server/KNOWN_LIMITATIONS.md)
+- **Local AI summarization**: Generates summaries, action items, and decisions — local LLM summarization shares the same stub caveat as above
 - **Pluggable providers**: Choose from local models or cloud STT/LLM providers (OpenAI, Anthropic, Deepgram, etc.)
 - **Flexible audio input**: Record system audio, use your microphone, import files, watch folders, or upload from your smartphone
 - **Encrypted storage**: AES-256-GCM encryption with Argon2id key derivation
@@ -54,19 +54,27 @@ Privacy-conscious teams, regulated industries, and organizations that need sover
 
 ### Desktop App
 
+前置：Rust 工具链（rustup）、Node.js 20+，以及 Tauri 1.x 的系统依赖
+（macOS：Xcode CLT；Linux：libwebkit2gtk/webkit2gtk-4.1 等开发包）。
+
 ```bash
 cd desktop-app
 npm install
-cd src-tauri
-cargo build
+npm run dev     # 开发运行（推荐）；npm run tauri build 产出安装包
 ```
+
+（顶层 `cargo build` 只产出裸二进制；打包/签名走 `npm run tauri build`，见 desktop-app/README.md）
 
 ### Team Server
 
+前置：Go ≥1.22、PostgreSQL 16、Redis 7；启动前建库建用户（建表自动迁移）：
+
 ```bash
+psql -c "CREATE ROLE recap WITH LOGIN PASSWORD 'recap';" -c "CREATE DATABASE recap OWNER recap;"
 cd team-server
-go build -o recap-team-server ./cmd/server
-./recap-team-server
+DATABASE_URL='postgres://recap:recap@localhost:5432/recap?sslmode=disable' \
+  REDIS_URL=localhost:6379 JWT_SECRET='<openssl rand -hex 32，≥32 字符>' \
+  go run ./cmd/server
 ```
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for the full build, test, and packaging instructions.
