@@ -78,3 +78,32 @@ describe("frontend loads without a bundler", () => {
     expect(mainJs).not.toMatch(/^\s*import\s+.*from\s+["']@tauri-apps\//m);
   });
 });
+
+describe("privacy: no remote resources at startup", () => {
+  const fs2 = require("fs");
+  const indexHtml = fs2.readFileSync(path.join(__dirname, "..", "src", "index.html"), "utf8");
+  const tauriConf = fs2.readFileSync(
+    path.join(__dirname, "..", "src-tauri", "tauri.conf.json"),
+    "utf8"
+  );
+
+  test("no remote stylesheets, scripts or fonts are loaded", () => {
+    // Only tags that fetch automatically at startup matter; a user-clicked
+    // <a href="https://odw.ai"> brand link is intentionally allowed.
+    const eagerTags = indexHtml.match(/<(link|script|img|style)[^>]*>/g) || [];
+    const remote = eagerTags.filter((t) => /(src|href)\s*=\s*["']https?:/.test(t));
+    expect(remote).toEqual([]);
+  });
+
+  test("CSP does not whitelist remote font/style hosts", () => {
+    expect(tauriConf).not.toContain("fonts.googleapis");
+    expect(tauriConf).not.toContain("fonts.gstatic");
+    expect(tauriConf).not.toContain("unsafe-inline");
+  });
+
+  test("fonts.css references only local files", () => {
+    const fontsCss = fs2.readFileSync(path.join(__dirname, "..", "src", "fonts.css"), "utf8");
+    expect(fontsCss).not.toMatch(/url\(["']?https?:/);
+    expect(fontsCss).toContain("assets/fonts/");
+  });
+});

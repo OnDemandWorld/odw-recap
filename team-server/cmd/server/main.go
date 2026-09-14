@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sort"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"

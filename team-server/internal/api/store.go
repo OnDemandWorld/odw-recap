@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -134,9 +135,15 @@ type dbAuditLogger struct {
 }
 
 func (l *dbAuditLogger) Log(ctx context.Context, e *models.AuditLog) {
+	// Details is a JSONB column; write the JSON string with an explicit cast
+	// (nil details -> SQL NULL).
+	var details interface{}
+	if e.Details != nil {
+		details = *e.Details
+	}
 	_, err := l.database.DB().ExecContext(ctx,
-		"INSERT INTO audit_log (user_id, action, resource_type, resource_id, ip_address, user_agent, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-		e.UserID, e.Action, e.ResourceType, e.ResourceID, e.IPAddress, e.UserAgent, e.CreatedAt,
+		"INSERT INTO audit_log (user_id, action, resource_type, resource_id, details, ip_address, user_agent, created_at) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)",
+		e.UserID, e.Action, e.ResourceType, e.ResourceID, details, e.IPAddress, e.UserAgent, e.CreatedAt,
 	)
 	if err != nil {
 		log.Printf("audit: failed to write audit log entry (action=%s): %v", e.Action, err)
@@ -144,9 +151,10 @@ func (l *dbAuditLogger) Log(ctx context.Context, e *models.AuditLog) {
 }
 
 // writeAudit records a "meeting"-scoped audit event for the authenticated
-// user. It is best-effort and safe to call when no audit logger is configured
+// user with optional JSON-serialisable details (e.g. {"status": "synced"}).
+// It is best-effort and safe to call when no audit logger is configured
 // (e.g. DB-less test servers) or when no user is present.
-func (s *Server) writeAudit(r *http.Request, user *models.User, action string, resourceID *uuid.UUID) {
+func (s *Server) writeAudit(r *http.Request, user *models.User, action string, resourceID *uuid.UUID, details interface{}) {
 	if s.audit == nil || user == nil {
 		return
 	}
@@ -155,11 +163,22 @@ func (s *Server) writeAudit(r *http.Request, user *models.User, action string, r
 	ip := r.RemoteAddr
 	userAgent := r.UserAgent()
 
+	var detailsStr *string
+	if details != nil {
+		if b, err := json.Marshal(details); err == nil {
+			str := string(b)
+			detailsStr = &str
+		} else {
+			log.Printf("audit: failed to marshal details for %s: %v", action, err)
+		}
+	}
+
 	s.audit.Log(r.Context(), &models.AuditLog{
 		UserID:       &user.ID,
 		Action:       action,
 		ResourceType: &resourceType,
 		ResourceID:   resourceID,
+		Details:      detailsStr,
 		IPAddress:    &ip,
 		UserAgent:    &userAgent,
 		CreatedAt:    time.Now(),

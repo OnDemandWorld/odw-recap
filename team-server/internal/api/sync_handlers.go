@@ -52,17 +52,32 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 	if parsed, err := uuid.Parse(meetingID); err == nil {
 		auditResourceID = &parsed
 	}
-	s.writeAudit(r, user, "meeting.sync", auditResourceID)
+	s.writeAudit(r, user, "meeting.sync", auditResourceID, map[string]string{"action": req.Action})
 
 	// Persist to sync_queue for auditability. Best-effort: a database failure
-	// here must not block the actual cross-product sync below.
+	// here must not block the actual cross-product sync below. The FK on
+	// meeting_id means a client-supplied id that is not an existing meeting
+	// row can never be inserted directly, so fall back to a NULL meeting_id
+	// (the column is nullable) to still record the sync attempt.
 	if s.db != nil {
 		if payload, err := json.Marshal(req); err == nil {
+			queueMeetingID := interface{}(meetingID)
+			if auditResourceID == nil {
+				// Not a UUID at all — insert NULL rather than a guaranteed FK error.
+				queueMeetingID = nil
+			}
 			if _, err := s.db.DB().Exec(
 				"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES ($1, $2, $3, $4, $5)",
-				meetingID, req.Action, string(payload), "pending", time.Now(),
+				queueMeetingID, req.Action, string(payload), "pending", time.Now(),
 			); err != nil {
-				log.Printf("sync: failed to persist sync_queue entry for meeting %s: %v", meetingID, err)
+				// Likely a FK violation (valid UUID but no such meeting row); retry
+				// without the reference so the sync is still captured.
+				if _, retryErr := s.db.DB().Exec(
+					"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES (NULL, $1, $2, $3, $4)",
+					req.Action, string(payload), "pending", time.Now(),
+				); retryErr != nil {
+					log.Printf("sync: failed to persist sync_queue entry for meeting %s: %v", meetingID, retryErr)
+				}
 			}
 		}
 	}

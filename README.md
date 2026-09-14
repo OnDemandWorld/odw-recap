@@ -88,6 +88,8 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for the full build, test, and packaging ins
 | [tsd.md](tsd.md) | Technical Specification Document |
 | [tbk.md](tbk.md) | Task Breakdown Document |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Current implementation status and build instructions |
+| [NEXT-STEPS.md](NEXT-STEPS.md) | 下一步开发计划：按优先级排列的待办、验收标准 (DoD) 与工作量 |
+| [CHANGELOG.md](CHANGELOG.md) | Notable changes, most-recent first |
 | [USER-GUIDE.zh-CN.md](USER-GUIDE.zh-CN.md) | 面向非技术人员的使用指南（中文，含截图级操作步骤） |
 | [research.md](research.md) | Market research and competitive analysis |
 | [CLAUDE.md](CLAUDE.md) | Guidance for AI assistants working on this codebase |

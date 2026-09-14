@@ -76,10 +76,11 @@
       toggleHttpServer(e.target.checked)
     );
 
-    // Drag & drop import (Tauri file-drop event).
+    // Drag & drop import (Tauri file-drop event). Import every dropped file,
+    // not just the first one.
     window.__TAURI__.event.listen("tauri://file-drop", (event) => {
       const paths = event.payload || event.detail || [];
-      if (Array.isArray(paths) && paths.length > 0) importAudioPath(paths[0]);
+      if (Array.isArray(paths) && paths.length > 0) importAudioPaths(paths);
     });
 
     // Watch-folder imports arrive as backend events.

@@ -110,7 +110,7 @@ func (s *Server) createMeetingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeAudit(r, user, "meeting.create", &meeting.ID)
+	s.writeAudit(r, user, "meeting.create", &meeting.ID, map[string]*string{"title": meeting.Title})
 
 	respondJSON(w, http.StatusCreated, map[string]interface{}{"id": meeting.ID, "status": meeting.Status})
 }
@@ -202,7 +202,7 @@ func (s *Server) updateMeetingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeAudit(r, user, "meeting.update", &meeting.ID)
+	s.writeAudit(r, user, "meeting.update", &meeting.ID, map[string]*string{"title": meeting.Title})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
@@ -248,7 +248,7 @@ func (s *Server) deleteMeetingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeAudit(r, user, "meeting.delete", &meeting.ID)
+	s.writeAudit(r, user, "meeting.delete", &meeting.ID, map[string]*string{"title": meeting.Title})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

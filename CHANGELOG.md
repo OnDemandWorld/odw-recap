@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > 端到端转写目前依赖云 provider 或远端 Ollama——见
 > [team-server/KNOWN_LIMITATIONS.md](team-server/KNOWN_LIMITATIONS.md)。
 
+## [Unreleased] - 2026-09-13
+
+### Security / Changed — 隐私与前端
+- **桌面端不再于启动时请求 Google Fonts**：字体改为**本地自托管**（`src/fonts.css` +
+  `src/assets/fonts/*.woff2`，Inter / JetBrains Mono 为 variable 单文件，Latin +
+  Latin-Ext 子集，约 200KB）。此前 `批次 E` 通过远程 CDN 加载，与"on-device /
+  sovereign"定位相悖（每次启动向 Google 泄漏 IP/UA/使用信号，且离线时字体回退）。
+  视觉结果保持一致。
+- **CSP 收紧**：`style-src 'self'`（去掉 `unsafe-inline` 与远程 host）、
+  `font-src 'self'`。新增 Jest 守卫：`<link|script|img>` 不得引用远程资源，
+  `fonts.css` 只允许本地 `assets/fonts/`（回归即失败）。
+- **拖拽导入多文件**：`tauri://file-drop` 现导入全部文件而非仅第一个。
+
+### Added — team-server 可审计性
+- **审计日志填充 `details` JSONB**：meeting.create/update 记录标题、meeting.sync
+  记录 action（此前该列恒为空）。
+- **sync_queue 外键回退**：客户端传入非 UUID / 不存在的 meeting id 时，
+  以 NULL `meeting_id` 落库，保证同步审计不丢（此前静默丢弃）。
+
+### Fixed
+- `team-server/cmd/server/main.go` 经 `gofmt` 规范化。
+
 ## [Unreleased] - 2026-09-12
 
 ### Changed — UI（评审批次 E）
