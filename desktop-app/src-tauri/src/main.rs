@@ -26,7 +26,12 @@ struct AppState {
     storage: Arc<Mutex<StorageManager>>,
     config: Arc<Mutex<ConfigManager>>,
     audio: Arc<Mutex<crate::audio_input::AudioInputManager>>,
+    sync: Arc<crate::sync::SyncEngine>,
 }
+
+/// Config key holding the team-server base URL (default localhost:8080).
+const TEAM_SERVER_URL_KEY: &str = "team_server.url";
+const TEAM_SERVER_URL_DEFAULT: &str = "http://localhost:8080";
 
 /// Richer meeting representation for the library list: the UI needs titles
 /// and status, not just opaque ids.
@@ -483,6 +488,10 @@ fn main() {
         storage: app_storage,
         config: Arc::new(Mutex::new(config)),
         audio: Arc::new(Mutex::new(audio)),
+        sync: Arc::new(crate::sync::SyncEngine::new(
+            TEAM_SERVER_URL_DEFAULT.to_string(),
+            None,
+        )),
     };
 
     tauri::Builder::default()
@@ -511,7 +520,11 @@ fn main() {
             start_http_upload_server,
             stop_http_upload_server,
             http_upload_server_status,
-            get_supported_audio_formats
+            get_supported_audio_formats,
+            team_server_login,
+            team_server_logout,
+            team_server_status,
+            sync_meeting_to_team_server
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -520,4 +533,171 @@ fn main() {
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+// ---------------------------------------------------------------------------
+// Team-server sync (Recap → Vault / Loop, via team-server /sync)
+// ---------------------------------------------------------------------------
+
+fn team_server_url(config: &ConfigManager) -> Result<String> {
+    Ok(config
+        .get_string(TEAM_SERVER_URL_KEY)?
+        .unwrap_or_else(|| TEAM_SERVER_URL_DEFAULT.to_string()))
+}
+
+#[derive(serde::Serialize)]
+struct TeamServerStatus {
+    logged_in: bool,
+    server_url: String,
+}
+
+/// Authenticate against the team server (POST /auth/login → JWT).
+#[tauri::command]
+async fn team_server_login(
+    email: String,
+    password: String,
+    server_url: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String> {
+    // Remember the URL for later sessions (persisted via the config DB) and
+    // rebuild the engine against it before authenticating.
+    {
+        let config = state
+            .config
+            .lock()
+            .map_err(|e| crate::error::RecapError::Config(format!("config lock: {}", e)))?;
+        let url = match server_url {
+            Some(u) => u,
+            None => team_server_url(&config)?,
+        };
+        config.set_string(TEAM_SERVER_URL_KEY, &url)?;
+        state.sync.reconfigure(url, None)?;
+    }
+    // reqwest runs on the async runtime; storage/config locks are released.
+    let token = state.sync.login(&email, &password).await?;
+    Ok(token)
+}
+
+/// Drop the stored team-server session token.
+#[tauri::command]
+fn team_server_logout(state: State<AppState>) -> Result<()> {
+    state.sync.logout()
+}
+
+/// Report login state + configured server URL for the UI.
+#[tauri::command]
+fn team_server_status(state: State<AppState>) -> Result<TeamServerStatus> {
+    let config = state
+        .config
+        .lock()
+        .map_err(|e| crate::error::RecapError::Config(format!("config lock: {}", e)))?;
+    Ok(TeamServerStatus {
+        logged_in: state.sync.is_logged_in()?,
+        server_url: team_server_url(&config)?,
+    })
+}
+
+/// Push a full meeting (metadata + transcript + summary + action items) to
+/// the team server, which forwards to Vault (knowledge) and Loop (workflows).
+/// The local `sync_status` column is updated to reflect the outcome.
+#[tauri::command]
+async fn sync_meeting_to_team_server(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<String> {
+    let meeting_id = parse_meeting_id(&id)?;
+
+    // Gather the payload from local storage, then release the lock before
+    // any network I/O (locks must never span await points).
+    let (mut meeting, transcript, summary, action_items) = {
+        let storage = lock_storage(&state)?;
+        let meeting = storage
+            .get_meeting(meeting_id)?
+            .ok_or_else(|| {
+                crate::error::RecapError::Storage(format!("meeting not found: {}", id))
+            })?;
+        let transcript = storage.get_transcript_segments(meeting_id)?;
+        let summary = storage.get_latest_summary(meeting_id)?;
+        let action_items = storage.get_action_items(meeting_id)?;
+        (meeting, transcript, summary, action_items)
+    };
+
+    let mut meeting_data = std::collections::HashMap::new();
+    meeting_data.insert(
+        "title".to_string(),
+        meeting.title.clone().unwrap_or_else(|| "Untitled meeting".to_string()),
+    );
+    if let Some(kind) = &meeting.meeting_type {
+        meeting_data.insert("meeting_type".to_string(), kind.clone());
+    }
+    if let Some(secs) = meeting.duration_seconds {
+        meeting_data.insert("duration_seconds".to_string(), secs.to_string());
+    }
+    meeting_data.insert("language".to_string(), meeting.language.clone());
+    if !meeting.participants.is_empty() {
+        meeting_data.insert(
+            "participants".to_string(),
+            meeting.participants.join(", "),
+        );
+    }
+
+    let transcript_data = serde_json::json!({
+        "segments": transcript
+            .iter()
+            .map(|s| serde_json::json!({
+                "start_ms": s.start_ms,
+                "end_ms": s.end_ms,
+                "text": s.text,
+                "speaker": s.speaker_id,
+            }))
+            .collect::<Vec<_>>(),
+    });
+
+    // NOTE: "action_items" is the trigger key for the Recap→Loop chain
+    // (INTEGRATION_CONTRACT §3 / DEPLOYMENT.md) — keep the exact field name.
+    let summary_data = serde_json::json!({
+        "content": summary.as_ref().map(|s| s.content.clone()).unwrap_or_default(),
+        "action_items": action_items,
+    });
+
+    // Persist the attempt before the network call.
+    meeting.sync_status = SyncStatus::Syncing;
+    {
+        let storage = lock_storage(&state)?;
+        storage.update_meeting(&meeting)?;
+    }
+
+    let result = state
+        .sync
+        .sync_meeting(&id, meeting_data, transcript_data, summary_data)
+        .await;
+
+    match result {
+        Ok(resp) => {
+            let status = if resp.status == "synced" {
+                SyncStatus::Synced
+            } else if resp.status == "partial" {
+                // Forwarded with errors; the team-server queue worker retries.
+                SyncStatus::Syncing
+            } else {
+                SyncStatus::Failed
+            };
+            let message = resp.message.clone();
+            let status_str = resp.status.clone();
+            meeting.sync_status = status;
+            {
+                let storage = lock_storage(&state)?;
+                storage.update_meeting(&meeting)?;
+            }
+            Ok(format!("{}: {}", status_str, message))
+        }
+        Err(e) => {
+            meeting.sync_status = SyncStatus::Failed;
+            {
+                let storage = lock_storage(&state)?;
+                storage.update_meeting(&meeting)?;
+            }
+            Err(e)
+        }
+    }
 }

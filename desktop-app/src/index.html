@@ -145,6 +145,28 @@
             </div>
 
             <div class="settings-group">
+              <h3>Team Server Sync</h3>
+              <p class="placeholder-text">Connect to your ODW Recap team server to push meeting knowledge into Vault and trigger Loop workflows from action items.</p>
+              <div class="setting-item">
+                <label>Server URL</label>
+                <input type="text" id="team-server-url" placeholder="http://localhost:8080" />
+              </div>
+              <div class="setting-item">
+                <label>Email</label>
+                <input type="email" id="team-server-email" placeholder="you@example.com" />
+              </div>
+              <div class="setting-item">
+                <label>Password</label>
+                <input type="password" id="team-server-password" placeholder="••••••••" />
+              </div>
+              <div class="setting-item">
+                <button id="team-server-login-btn" class="btn-primary">Connect</button>
+                <button id="team-server-logout-btn" class="btn-secondary">Disconnect</button>
+                <span id="team-server-status" class="key-status" aria-live="polite"></span>
+              </div>
+            </div>
+
+            <div class="settings-group">
               <h3>Prompt Templates</h3>
               <div class="setting-item">
                 <label>Template Name</label>

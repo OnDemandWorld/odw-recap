@@ -46,6 +46,21 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 		meetingID = uuid.New().String()
 	}
 
+	// Tenant isolation: when the id references an EXISTING meeting, the caller
+	// must own it (same rule as /meetings/*). Without this check any
+	// authenticated user could sync against someone else's meeting — writing
+	// audit rows and Vault documents attributed to the victim's meeting id.
+	if s.meetings != nil {
+		if parsed, err := uuid.Parse(meetingID); err == nil {
+			if meeting, err := s.meetings.Get(r.Context(), parsed); err == nil {
+				if !s.canAccess(user, meeting) {
+					respondError(w, http.StatusForbidden, "You do not have access to this meeting")
+					return
+				}
+			}
+		}
+	}
+
 	// Best-effort audit trail for the sync action. The meeting id is only a
 	// UUID when the desktop app supplied one; otherwise resource_id stays nil.
 	var auditResourceID *uuid.UUID
@@ -54,11 +69,13 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeAudit(r, user, "meeting.sync", auditResourceID, map[string]string{"action": req.Action})
 
-	// Persist to sync_queue for auditability. Best-effort: a database failure
-	// here must not block the actual cross-product sync below. The FK on
-	// meeting_id means a client-supplied id that is not an existing meeting
-	// row can never be inserted directly, so fall back to a NULL meeting_id
-	// (the column is nullable) to still record the sync attempt.
+	// Persist to sync_queue for auditability + retry. The row id is captured
+	// so the inline forward below settles it to processed/failed — rows used
+	// to stay 'pending' forever. The FK on meeting_id means a client-supplied
+	// id that is not an existing meeting row can never be inserted directly,
+	// so fall back to a NULL meeting_id (the column is nullable) to still
+	// record the sync attempt.
+	var queueRowID int64
 	if s.db != nil {
 		if payload, err := json.Marshal(req); err == nil {
 			queueMeetingID := interface{}(meetingID)
@@ -66,19 +83,42 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 				// Not a UUID at all — insert NULL rather than a guaranteed FK error.
 				queueMeetingID = nil
 			}
-			if _, err := s.db.DB().Exec(
-				"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES ($1, $2, $3, $4, $5)",
+			if err := s.db.DB().QueryRow(
+				"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id",
 				queueMeetingID, req.Action, string(payload), "pending", time.Now(),
-			); err != nil {
+			).Scan(&queueRowID); err != nil {
 				// Likely a FK violation (valid UUID but no such meeting row); retry
 				// without the reference so the sync is still captured.
-				if _, retryErr := s.db.DB().Exec(
-					"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES (NULL, $1, $2, $3, $4)",
+				if retryErr := s.db.DB().QueryRow(
+					"INSERT INTO sync_queue (meeting_id, action, payload, status, created_at) VALUES (NULL, $1, $2, $3, $4) RETURNING id",
 					req.Action, string(payload), "pending", time.Now(),
-				); retryErr != nil {
+				).Scan(&queueRowID); retryErr != nil {
 					log.Printf("sync: failed to persist sync_queue entry for meeting %s: %v", meetingID, retryErr)
 				}
 			}
+		}
+	}
+
+	// settleQueue records the outcome of the inline forward on the queue row
+	// (the retry worker picks up 'failed' rows with backoff).
+	settleQueue := func(status string, retryCount int, errMsg string) {
+		if s.db == nil || queueRowID == 0 {
+			return
+		}
+		if status == "processed" {
+			if _, err := s.db.DB().Exec(
+				"UPDATE sync_queue SET status = $1, retry_count = $2, processed_at = NOW(), next_attempt_at = NULL WHERE id = $3",
+				status, retryCount, queueRowID,
+			); err != nil {
+				log.Printf("sync: failed to settle sync_queue row %d: %v", queueRowID, err)
+			}
+			return
+		}
+		if _, err := s.db.DB().Exec(
+			"UPDATE sync_queue SET status = $1, retry_count = $2, last_error = $3 WHERE id = $4",
+			status, retryCount, errMsg, queueRowID,
+		); err != nil {
+			log.Printf("sync: failed to settle sync_queue row %d: %v", queueRowID, err)
 		}
 	}
 
@@ -102,8 +142,10 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.syncForwarder.ProcessSync(r.Context(), syncReq); err != nil {
 		// One or more targets failed, but we do not 500 the whole request —
-		// record the error and report a partial sync.
+		// record the error, leave the queue row for the retry worker, and
+		// report a partial sync.
 		log.Printf("sync: partial sync for meeting %s: %v", meetingID, err)
+		settleQueue("failed", 1, err.Error())
 		respondJSON(w, http.StatusOK, SyncResponse{
 			Status:    "partial",
 			MeetingID: meetingID,
@@ -112,6 +154,7 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	settleQueue("processed", 0, "")
 	respondJSON(w, http.StatusOK, SyncResponse{
 		Status:    "synced",
 		MeetingID: meetingID,

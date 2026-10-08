@@ -1,6 +1,6 @@
 use crate::error::{RecapError, Result};
 use axum::{
-    extract::{Multipart, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Query, State},
     response::{IntoResponse, Json},
     routing::post,
     Router,
@@ -10,6 +10,11 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// Maximum accepted upload size (500 MiB). axum's Multipart defaults to a
+/// 2 MiB body limit — real recordings (an hour of m4a is ~30 MiB) were all
+/// rejected before this was raised.
+const MAX_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
 /// Upload server shared secret. It is embedded in the URL shown to the user
 /// (e.g. `http://192.168.1.5:8765/upload/audio?token=...`), so a phone can
@@ -49,6 +54,7 @@ impl HttpUploadServer {
         };
         let app = Router::new()
             .route("/upload/audio", post(upload_audio))
+            .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
             .with_state(state);
 
         // 0.0.0.0 is intentional: the whole feature is "upload from another
@@ -123,10 +129,21 @@ async fn upload_audio(
         }));
     }
 
-    let mut file_data = None;
+    let mut file_data: Option<Result<Vec<u8>>> = None;
     let mut ext = "m4a".to_string();
 
-    while let Some(field) = multipart.next_field().await.ok().flatten() {
+    // Multipart errors are surfaced (previously .ok() swallowed them into a
+    // misleading "No file provided"). Stream field bytes rather than
+    // buffering: multipart errors propagate with their real cause.
+    while let Some(field) = match multipart.next_field().await {
+        Ok(f) => f,
+        Err(e) => {
+            return Json(json!({
+                "status": "error",
+                "message": format!("Malformed multipart upload: {}", e)
+            }));
+        }
+    } {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" {
             let filename = field.file_name().unwrap_or("recording.m4a").to_string();
@@ -135,30 +152,45 @@ async fn upload_audio(
                 .and_then(|e| e.to_str())
                 .unwrap_or("m4a")
                 .to_ascii_lowercase();
-            file_data = field.bytes().await.ok();
+            file_data = Some(
+                field
+                    .bytes()
+                    .await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| RecapError::AudioInput(format!("Failed to read upload: {}", e))),
+            );
         }
     }
 
-    if let Some(data) = file_data {
-        let uuid = Uuid::new_v4();
-        let path = state.inbox_path.join(format!("{}.{}", uuid, ext));
-        if let Err(e) = tokio::fs::write(&path, &data).await {
+    let data = match file_data {
+        Some(Ok(data)) => data,
+        Some(Err(e)) => {
             return Json(json!({
                 "status": "error",
-                "message": format!("Failed to save file: {}", e)
+                "message": format!("{}", e)
             }));
         }
+        None => {
+            return Json(json!({
+                "status": "error",
+                "message": "No file provided"
+            }));
+        }
+    };
 
+    let uuid = Uuid::new_v4();
+    let path = state.inbox_path.join(format!("{}.{}", uuid, ext));
+    if let Err(e) = tokio::fs::write(&path, &data).await {
         return Json(json!({
-            "status": "uploaded",
-            "meeting_id": uuid.to_string(),
-            "message": "Audio uploaded successfully",
-            "path": path.to_string_lossy().to_string()
+            "status": "error",
+            "message": format!("Failed to save file: {}", e)
         }));
     }
 
     Json(json!({
-        "status": "error",
-        "message": "No file provided"
+        "status": "uploaded",
+        "meeting_id": uuid.to_string(),
+        "message": "Audio uploaded successfully",
+        "path": path.to_string_lossy().to_string()
     }))
 }

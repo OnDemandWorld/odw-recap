@@ -1,7 +1,13 @@
 use crate::error::{RecapError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Client for syncing data with the team server and integrations
+/// Client for syncing data with the team server.
+///
+/// The desktop app authenticates via `POST /auth/login` (JWT) and pushes a
+/// full meeting payload to `POST /sync`; the team-server forwards to Vault
+/// (knowledge) and Loop (action-item workflows). See INTEGRATION_CONTRACT §3.
+#[derive(Clone)]
 pub struct SyncClient {
     server_url: String,
     api_token: Option<String>,
@@ -12,55 +18,133 @@ pub struct SyncClient {
 struct SyncRequest {
     meeting_id: String,
     action: String,
-    meeting_data: std::collections::HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meeting_data: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary_data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SyncResponse {
-    status: String,
-    meeting_id: String,
-    message: String,
+pub struct SyncResponse {
+    pub status: String,
+    #[serde(default)]
+    pub meeting_id: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginResponse {
+    token: String,
+}
+
+fn clean_base_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
 }
 
 impl SyncClient {
     pub fn new(server_url: String, api_token: Option<String>) -> Self {
         Self {
-            server_url,
+            server_url: clean_base_url(&server_url),
             api_token,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
-    /// Sync a meeting to the team server
-    pub fn sync_meeting(&self, meeting_id: &str) -> Result<()> {
-        // In a real implementation, this would:
-        // 1. Retrieve meeting data from local storage
-        // 2. Retrieve transcript, summary, action items, decisions
-        // 3. Send to team server via API
-        // 4. Update sync status in local database
+    pub fn set_token(&mut self, token: Option<String>) {
+        self.api_token = token;
+    }
 
-        if self.api_token.is_none() {
-            return Err(RecapError::Sync("API token not configured".to_string()));
+    pub fn has_token(&self) -> bool {
+        self.api_token.is_some()
+    }
+
+    /// Authenticate against the team server and return the JWT.
+    pub async fn login(&self, email: &str, password: &str) -> Result<String> {
+        let resp = self
+            .client
+            .post(format!("{}/auth/login", self.server_url))
+            .json(&serde_json::json!({
+                "email": email,
+                "password": password,
+            }))
+            .send()
+            .await
+            .map_err(|e| RecapError::Sync(format!("login request failed: {}", e)))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| RecapError::Sync(format!("login response read failed: {}", e)))?;
+        if !status.is_success() {
+            return Err(RecapError::Sync(format!(
+                "login failed (HTTP {}): {}",
+                status,
+                truncate(&body)
+            )));
         }
-
-        Ok(())
+        let parsed: LoginResponse = serde_json::from_str(&body)
+            .map_err(|e| RecapError::Sync(format!("login response parse failed: {}", e)))?;
+        Ok(parsed.token)
     }
 
-    /// Get sync status for a meeting
-    pub fn get_sync_status(&self, meeting_id: &str) -> Result<String> {
-        // In a real implementation, this would query the team server
-        Ok("not_synced".to_string())
-    }
+    /// Push a full meeting payload to the team server (`POST /sync`).
+    pub async fn sync_meeting(
+        &self,
+        meeting_id: &str,
+        meeting_data: HashMap<String, String>,
+        transcript_data: serde_json::Value,
+        summary_data: serde_json::Value,
+    ) -> Result<SyncResponse> {
+        let token = self
+            .api_token
+            .clone()
+            .ok_or_else(|| RecapError::Sync("not logged in to team server".to_string()))?;
 
-    /// Sync to Vault (knowledge module)
-    pub fn sync_to_vault(&self, meeting_id: &str) -> Result<()> {
-        // In a real implementation, this would push meeting knowledge to Vault
-        Ok(())
-    }
+        let req = SyncRequest {
+            meeting_id: meeting_id.to_string(),
+            action: "full_sync".to_string(),
+            meeting_data: Some(meeting_data),
+            transcript_data: Some(transcript_data),
+            summary_data: Some(summary_data),
+        };
 
-    /// Sync to Loop (workflows module)
-    pub fn sync_to_loop(&self, meeting_id: &str) -> Result<()> {
-        // In a real implementation, this would push action items to Loop
-        Ok(())
+        let resp = self
+            .client
+            .post(format!("{}/sync", self.server_url))
+            .bearer_auth(token)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| RecapError::Sync(format!("sync request failed: {}", e)))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| RecapError::Sync(format!("sync response read failed: {}", e)))?;
+        if !status.is_success() {
+            return Err(RecapError::Sync(format!(
+                "sync failed (HTTP {}): {}",
+                status,
+                truncate(&body)
+            )));
+        }
+        serde_json::from_str(&body)
+            .map_err(|e| RecapError::Sync(format!("sync response parse failed: {}", e)))
+    }
+}
+
+fn truncate(s: &str) -> String {
+    if s.len() > 300 {
+        format!("{}…", &s[..300])
+    } else {
+        s.to_string()
     }
 }

@@ -135,13 +135,23 @@ func main() {
 	})
 	server.SetSyncForwarder(syncForwarder)
 
-	// Create HTTP server
+	// Retry worker: sync_queue rows that failed inline forwarding (Vault/Loop
+	// blip, timeout) are re-attempted with exponential backoff instead of
+	// being lost. Tied to the shutdown context below.
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	odwsync.NewQueueWorker(database.DB(), syncForwarder, 30*time.Second).Start(workerCtx)
+
+	// Create HTTP server. WriteTimeout must exceed the in-request sync
+	// forwarding budget (up to 30s Vault + 30s Loop, within chi's 60s handler
+	// timeout): with 15s the client saw a connection reset while the server
+	// kept uploading, and the retry duplicated Vault documents.
 	httpServer := &http.Server{
 		Addr:         ":" + port,
 		Handler:      server.Router(),
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		WriteTimeout: 70 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Start server in goroutine
@@ -158,6 +168,10 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
+
+	// Stop the sync queue worker before draining HTTP: no new retries fire
+	// while in-flight requests settle.
+	workerCancel()
 
 	// Graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

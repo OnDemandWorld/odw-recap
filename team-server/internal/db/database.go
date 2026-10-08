@@ -195,6 +195,11 @@ func runMigrations(db *sql.DB) error {
 		`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS vault_entry_id TEXT`,
 		`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS loop_task_id TEXT`,
 
+		// Sync queue retry bookkeeping (queue worker)
+		`ALTER TABLE sync_queue ADD COLUMN IF NOT EXISTS last_error TEXT`,
+		`ALTER TABLE sync_queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_queue_status_due ON sync_queue(status, next_attempt_at)`,
+
 		// Create indexes
 		`CREATE INDEX IF NOT EXISTS idx_meetings_organization ON meetings(organization_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_meetings_created_by ON meetings(created_by)`,

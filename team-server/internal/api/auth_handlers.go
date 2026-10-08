@@ -44,6 +44,14 @@ type AuthResponse struct {
 // dotted domain, no whitespace.
 var emailPattern = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 
+// dummyBcryptHash is a fixed bcrypt digest of an unguessable random string.
+// Login compares against it when the account does not exist so both branches
+// pay the same bcrypt cost (timing-safe account enumeration).
+var dummyBcryptHash = func() string {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("timing-equalizer-no-login-7f3a9c"), bcrypt.DefaultCost)
+	return string(hash)
+}()
+
 // validateRegisterRequest normalizes the request and returns a
 // user-facing error message when the input is unacceptable. bcrypt only
 // hashes the first 72 bytes, so longer passwords are rejected instead of
@@ -152,6 +160,10 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 	).Scan(&user.ID, &user.Email, &passwordHash, &user.Name, &user.Role, &user.CreatedAt, &user.UpdatedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
+		// Compare against a dummy hash so the missing-account path burns the
+		// same ~100ms of bcrypt as the existing-account path — the timing
+		// difference otherwise enumerated valid emails.
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(req.Password))
 		respondError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	} else if err != nil {

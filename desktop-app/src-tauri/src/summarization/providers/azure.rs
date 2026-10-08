@@ -20,7 +20,10 @@ impl AzureProvider {
             api_key,
             endpoint,
             deployment_name,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
         }
     }
 

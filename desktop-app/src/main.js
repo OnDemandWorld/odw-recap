@@ -64,6 +64,8 @@
     // Settings
     document.querySelector("#save-api-keys-btn").addEventListener("click", saveApiKeys);
     document.querySelector("#save-template-btn").addEventListener("click", savePromptTemplate);
+    document.querySelector("#team-server-login-btn").addEventListener("click", teamServerLogin);
+    document.querySelector("#team-server-logout-btn").addEventListener("click", teamServerLogout);
     document.querySelector("#stt-provider").addEventListener("change", (e) =>
       persistSetting("stt_provider", e.target.value)
     );
@@ -178,9 +180,15 @@
         invoke("get_action_items", { id }),
         invoke("get_decisions", { id }),
       ]);
+      // Out-of-response guard: a slow response for meeting A must not
+      // overwrite the view after the user already switched to meeting B —
+      // the Delete/Process buttons bind to the rendered data, so rendering
+      // the stale meeting could act on the wrong one.
+      if (currentMeetingId !== id) return;
       renderDetail(meeting, transcript, summary, actionItems, decisions);
       setStatus(`Viewing: ${meeting.title || id}`);
     } catch (error) {
+      if (currentMeetingId !== id) return;
       setStatus(`Error loading details: ${error}`);
       console.error("Failed to load meeting details:", error);
       meetingDetailEl.innerHTML = `
@@ -241,6 +249,7 @@
           <button id="process-meeting-btn" class="btn-primary" ${ready ? "disabled" : ""}>
             ${ready ? "Processed" : "Process Meeting"}
           </button>
+          <button id="sync-meeting-btn" class="btn-secondary" ${ready ? "" : "disabled title=\"Process the meeting before syncing\""}>Sync</button>
           <button id="delete-meeting-btn" class="btn-secondary">Delete</button>
           <button id="back-to-library-btn" class="btn-secondary">Back to Library</button>
         </div>
@@ -272,6 +281,8 @@
     bindBackButton();
     const processBtn = document.querySelector("#process-meeting-btn");
     if (processBtn && !ready) processBtn.addEventListener("click", () => processMeeting(meeting.id));
+    const syncBtn = document.querySelector("#sync-meeting-btn");
+    if (syncBtn && ready) syncBtn.addEventListener("click", () => syncMeetingToTeamServer(meeting.id));
     document.querySelector("#delete-meeting-btn").addEventListener("click", () => deleteMeeting(meeting.id));
   }
 
@@ -369,6 +380,15 @@
     }
   }
 
+  // Drag-and-drop delivers a list of paths (tauri://file-drop) — import each
+  // sequentially. This function was previously missing entirely, so dropping
+  // files onto the window threw a ReferenceError and silently dropped them.
+  async function importAudioPaths(paths) {
+    for (const path of paths) {
+      await importAudioPath(path);
+    }
+  }
+
   async function loadSupportedFormats() {
     try {
       const formats = await invoke("get_supported_audio_formats");
@@ -389,6 +409,72 @@
     } catch (error) {
       setStatus(`Failed to save setting: ${error}`);
       console.error("Failed to save setting:", error);
+    }
+  }
+
+  // ---- Team server sync (Recap → Vault / Loop) ----
+
+  async function teamServerLogin() {
+    const url = (document.querySelector("#team-server-url").value || "").trim();
+    const email = (document.querySelector("#team-server-email").value || "").trim();
+    const password = document.querySelector("#team-server-password").value || "";
+    if (!email || !password) {
+      setStatus("Team server: email and password are required.");
+      return;
+    }
+    try {
+      const hint = document.querySelector("#team-server-status");
+      if (hint) hint.textContent = "Connecting…";
+      await invoke("team_server_login", {
+        email,
+        password,
+        serverUrl: url || null,
+      });
+      document.querySelector("#team-server-password").value = "";
+      setStatus("Connected to team server.");
+      await refreshTeamServerStatus();
+    } catch (error) {
+      setStatus(`Team server login failed: ${error}`);
+      console.error("Team server login failed:", error);
+      await refreshTeamServerStatus();
+    }
+  }
+
+  async function teamServerLogout() {
+    try {
+      await invoke("team_server_logout");
+      setStatus("Disconnected from team server.");
+    } catch (error) {
+      setStatus(`Logout failed: ${error}`);
+    }
+    await refreshTeamServerStatus();
+  }
+
+  async function refreshTeamServerStatus() {
+    try {
+      const status = await invoke("team_server_status");
+      const hint = document.querySelector("#team-server-status");
+      if (hint) {
+        hint.textContent = status.logged_in ? "Connected ✓" : "Not connected";
+        hint.classList.toggle("saved", status.logged_in);
+      }
+      if (status.server_url && !document.querySelector("#team-server-url").value) {
+        document.querySelector("#team-server-url").value = status.server_url;
+      }
+    } catch (error) {
+      console.error("Failed to read team server status:", error);
+    }
+  }
+
+  async function syncMeetingToTeamServer(id) {
+    try {
+      setStatus("Syncing meeting to team server (Vault + Loop)…");
+      const outcome = await invoke("sync_meeting_to_team_server", { id });
+      setStatus(`Sync finished — ${outcome}`);
+      await loadMeetings();
+    } catch (error) {
+      setStatus(`Sync failed: ${error}. Connect the team server in Settings first.`);
+      console.error("Sync failed:", error);
     }
   }
 
@@ -419,6 +505,7 @@
     } catch (error) {
       console.error("Failed to restore settings:", error);
     }
+    await refreshTeamServerStatus();
   }
 
   async function saveApiKeys() {

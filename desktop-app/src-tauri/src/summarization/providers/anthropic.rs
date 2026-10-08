@@ -36,7 +36,10 @@ impl AnthropicProvider {
     pub fn new(api_key: Option<String>) -> Self {
         Self {
             api_key,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
