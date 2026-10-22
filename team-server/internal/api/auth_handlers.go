@@ -94,13 +94,21 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create user
+	// Create user. R-10: the FIRST account becomes admin — no role elevation
+	// endpoint exists, so without this /admin/* routes are unreachable without
+	// hand-written SQL.
+	role := "member"
+	var count int
+	if err := s.db.DB().QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err == nil && count == 0 {
+		role = "admin"
+	}
+
 	user := &models.User{
 		ID:           uuid.New(),
 		Email:        req.Email,
 		PasswordHash: string(hashedPassword),
 		Name:         req.Name,
-		Role:         "member",
+		Role:         role,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}

@@ -90,10 +90,19 @@ impl STTProvider for DeepgramProvider {
         // Read audio file
         let audio_data = tokio::fs::read(audio_path).await?;
 
-        // Make API request
+        // Make API request (R-12: include the per-meeting language — FR-TR-15
+        // previously had no effect on Deepgram requests).
+        let language = config
+            .language
+            .clone()
+            .unwrap_or_else(|| "en".to_string());
+        let url = format!(
+            "https://api.deepgram.com/v1/listen?punctuate=true&language={}",
+            language
+        );
         let response = self
             .client
-            .post("https://api.deepgram.com/v1/listen?punctuate=true")
+            .post(url)
             .header("Authorization", format!("Token {}", api_key))
             .header("Content-Type", "audio/mpeg")
             .body(audio_data)
@@ -127,6 +136,7 @@ impl STTProvider for DeepgramProvider {
                     // Group words into segments (simple approach: every 10 words)
                     let mut segments = Vec::new();
                     let mut current_words = Vec::new();
+                    let mut word_confidences = Vec::new();
                     let mut start_time = 0.0;
 
                     for (i, word) in words.iter().enumerate() {
@@ -134,13 +144,16 @@ impl STTProvider for DeepgramProvider {
                             start_time = word.start;
                         }
                         current_words.push(word.word.clone());
+                        word_confidences.push(word.confidence);
 
                         if current_words.len() >= 10 || i == words.len() - 1 {
                             let end_time = word.end;
                             let text = current_words.join(" ");
-                            let avg_confidence =
-                                current_words.iter().map(|_| word.confidence).sum::<f64>()
-                                    / current_words.len() as f64;
+                            // R-12: average the words' OWN confidences — the
+                            // previous map(|_| word.confidence) used the last
+                            // word's value for every word.
+                            let avg_confidence = word_confidences.iter().sum::<f64>()
+                                / word_confidences.len().max(1) as f64;
 
                             let id = segment_id;
                             segment_id += 1;
@@ -157,6 +170,7 @@ impl STTProvider for DeepgramProvider {
                             });
 
                             current_words.clear();
+                            word_confidences.clear();
                         }
                     }
 

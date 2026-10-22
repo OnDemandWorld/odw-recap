@@ -53,6 +53,16 @@ before Recap can be sold as an on-device Otter/Fireflies/Fathom alternative.
 
 ## Security note (desktop app)
 
+**Data-at-rest scope (2026-10-22 deep review, R-1)**: only *credentials*
+(API keys) are encrypted with AES-256-GCM today. Meeting **audio files and
+transcripts/summaries are stored unencrypted** in `~/RecapData` (SQLite +
+inbox). Closing this requires end-to-end changes across the encryption read
+path (transcription, playback, export, sync) — a half-enabled path that
+encrypts files the pipeline can no longer read would be worse than the
+current honest state. Planned: SQLCipher for the library + encrypted inbox
+files with transparent decryption in the pipeline. Until then, protect the
+data directory at the OS level (FileVault / BitLocker).
+
 The storage encryption passphrase is read from the
 `RECAP_ENCRYPTION_PASSPHRASE` environment variable with **no hardcoded
 default**. When unset, the app logs a warning and falls back to an empty

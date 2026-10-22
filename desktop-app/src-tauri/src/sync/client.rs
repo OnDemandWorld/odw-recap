@@ -107,6 +107,50 @@ impl SyncClient {
             .clone()
             .ok_or_else(|| RecapError::Sync("not logged in to team server".to_string()))?;
 
+        // R-5: upsert the meeting row first — POST /meetings with a client
+        // id makes /sync reference a real meeting (409 on the server for an
+        // existing id is fine). Without this the meeting never showed up in
+        // the team-server library and admin stats.
+        let mut meeting_body = serde_json::Map::new();
+        for (k, v) in &meeting_data {
+            meeting_body.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+        meeting_body.insert(
+            "id".to_string(),
+            serde_json::Value::String(meeting_id.to_string()),
+        );
+        if !meeting_body
+            .get("title")
+            .map(|v| !v.as_str().unwrap_or("").trim().is_empty())
+            .unwrap_or(false)
+        {
+            meeting_body.insert(
+                "title".to_string(),
+                serde_json::Value::String("Synced meeting".to_string()),
+            );
+        }
+        let upsert = self
+            .client
+            .post(format!("{}/meetings/", self.server_url))
+            .bearer_auth(&token)
+            .json(&serde_json::Value::Object(meeting_body))
+            .send()
+            .await
+            .map_err(|e| RecapError::Sync(format!("meeting upsert request failed: {}", e)))?;
+        // 2xx = created, 409 = already exists (team-server semantics) — both
+        // let the /sync below reference a real row. Other statuses: the server
+        // side of /sync falls back to a NULL-meeting queue entry, so surface
+        // the failure instead of silently proceeding.
+        let upsert_status = upsert.status();
+        if !upsert_status.is_success() && upsert_status.as_u16() != 409 {
+            let body = upsert.text().await.unwrap_or_default();
+            return Err(RecapError::Sync(format!(
+                "meeting upsert failed (HTTP {}): {}",
+                upsert_status,
+                truncate(&body)
+            )));
+        }
+
         let req = SyncRequest {
             meeting_id: meeting_id.to_string(),
             action: "full_sync".to_string(),
@@ -142,8 +186,14 @@ impl SyncClient {
 }
 
 fn truncate(s: &str) -> String {
+    // R-8: char-boundary-safe truncation — a raw byte slice panicked whenever
+    // a multibyte (e.g. Chinese) error body crossed the 300-byte cut.
     if s.len() > 300 {
-        format!("{}…", &s[..300])
+        let mut end = 300;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     } else {
         s.to_string()
     }

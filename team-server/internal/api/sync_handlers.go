@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -52,11 +53,22 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 	// audit rows and Vault documents attributed to the victim's meeting id.
 	if s.meetings != nil {
 		if parsed, err := uuid.Parse(meetingID); err == nil {
-			if meeting, err := s.meetings.Get(r.Context(), parsed); err == nil {
+			meeting, err := s.meetings.Get(r.Context(), parsed)
+			switch {
+			case err == nil:
 				if !s.canAccess(user, meeting) {
 					respondError(w, http.StatusForbidden, "You do not have access to this meeting")
 					return
 				}
+			case errors.Is(err, ErrMeetingNotFound):
+				// Unknown id: /sync creates the audit row with a NULL meeting
+				// reference — allowed (existing semantics).
+			default:
+				// R-18: a genuine DB error previously fell into the "allowed"
+				// branch, skipping the tenant check entirely.
+				log.Printf("ERROR meeting lookup failed during /sync owner check: %v", err)
+				respondError(w, http.StatusInternalServerError, "meeting lookup failed")
+				return
 			}
 		}
 	}

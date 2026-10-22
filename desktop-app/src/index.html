@@ -34,6 +34,12 @@
         <div id="library-view" class="view active">
           <div class="view-header">
             <h2>Meetings</h2>
+            <input
+              type="search"
+              id="transcript-search"
+              placeholder="Search transcripts…"
+              style="flex:1;max-width:320px;padding:.4rem .6rem;border:1px solid var(--border,#d1d5db);border-radius:6px;"
+            />
             <button id="refresh-btn" class="btn-secondary">Refresh</button>
           </div>
           <div id="meeting-list" class="meeting-list">
@@ -94,13 +100,13 @@
               <div class="setting-item">
                 <label>Default Provider</label>
                 <select id="stt-provider">
-                  <option value="whisper_local">Whisper Local (whisper.cpp)</option>
+                  <option value="whisper_local">Whisper Local (whisper.cpp) — not yet available</option>
                   <option value="openai">OpenAI Whisper API</option>
-                  <option value="assemblyai">AssemblyAI</option>
                   <option value="deepgram">Deepgram</option>
-                  <option value="aws_transcribe">AWS Transcribe</option>
-                  <option value="azure_speech">Azure Speech</option>
-                  <option value="google_stt">Google Speech-to-Text</option>
+                  <option value="assemblyai" disabled>AssemblyAI (not yet available)</option>
+                  <option value="aws_transcribe" disabled>AWS Transcribe (not yet available)</option>
+                  <option value="azure_speech" disabled>Azure Speech (not yet available)</option>
+                  <option value="google_stt" disabled>Google Speech-to-Text (not yet available)</option>
                 </select>
               </div>
             </div>
@@ -110,13 +116,14 @@
               <div class="setting-item">
                 <label>Default Provider</label>
                 <select id="llm-provider">
-                  <option value="llama_local">Llama.cpp (Local)</option>
-                  <option value="ollama">Ollama (Local)</option>
+                  <option value="rule_based">Rule-based (offline, always available)</option>
                   <option value="openai">OpenAI</option>
                   <option value="anthropic">Anthropic Claude</option>
-                  <option value="google">Google Gemini</option>
-                  <option value="aws_bedrock">AWS Bedrock</option>
-                  <option value="azure">Azure OpenAI</option>
+                  <option value="ollama">Ollama (Local)</option>
+                  <option value="llama_local" disabled>Llama.cpp (Local) — not yet available</option>
+                  <option value="google" disabled>Google Gemini (not yet available)</option>
+                  <option value="aws_bedrock" disabled>AWS Bedrock (not yet available)</option>
+                  <option value="azure" disabled>Azure OpenAI (not yet available)</option>
                 </select>
               </div>
             </div>

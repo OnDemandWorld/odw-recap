@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > 端到端转写目前依赖云 provider 或远端 Ollama——见
 > [team-server/KNOWN_LIMITATIONS.md](team-server/KNOWN_LIMITATIONS.md)。
 
+## [Unreleased] - 2026-10-22（第六轮深度审查）
+
+### Added
+- **手机上传页 `GET /upload/audio`（R-2）**：极简 HTML 上传表单（token 隐藏域内联），
+  USER-GUIDE §6 "手机浏览器打开网址上传" 全流程首次真正可用。
+- **`search_transcripts` 命令 + 会议库搜索框（R-6）**：FTS5 全文检索端到端可用——
+  save_transcript_segments 事务内维护外部内容索引（旧行 delete 命令退役 + 新行
+  索引），查询修正 join（tseg.id 而非 rowid 错位）+ rank 排序 + 高亮片段；
+  会议库头部回车搜索并点击跳转详情。
+
+### Fixed
+- **[P0] 手机上传链路断裂（R-2）**：上传只写文件并返回伪造 meeting_id（不存在于任何
+  表）——文件永不被处理、会议库永不可见。现复用入库助手创建真实会议行（标题/
+  音频路径/大小/来源=MobileUpload），并校验扩展名（白名单 m4a/wav/mp3/ogg/webm/flac）。
+- **[P0] 云端 LLM 摘要行动项恒空（R-3）**：openai/anthropic/ollama 返回自由文本而
+  action_items/decisions 硬编码空——UI 显示 "No action items detected"，且
+  action_items 为空使 Recap→Loop webhook 链路永不触发。现 prompt 请求严格 JSON
+  （STRUCTURED_OUTPUT_INSTRUCTION 公共层），解析容忍 markdown 围栏/散文包裹/
+  非字符串数组项，失败回退规则提取器（行动项永不静默消失）。
+- **[P1] 监听文件夹 provider 配置（R-4）**：导入硬编码 whisper_local（stub）必然
+  "not available yet"；现从 Settings 读取 stt/llm provider。
+- **[P1] 桌面同步先建会（R-5）**：sync 从不 POST /meetings——服务端 FK 违例回退
+  NULL 会议入队，会议永不出现在团队库/管理统计。现先 upsert（409=已存在放行）再
+  /sync。
+- **[P2] worker 重复消费（R-7）**：claim 先 commit 再转发，锁即刻释放——双副本下
+  同一行被重复转发（重复 Vault 文档）。claim 事务内置 processing + 10 分钟租约，
+  过期可重领。
+- **[P2] truncate 多字节 panic（R-8）**：错误体含中文且 300 字节边界切在字符中间时
+  panic；char_boundary 安全截断。
+- **[P2] JWT 过期恢复（R-9）**：24h 后所有同步 401 且 "log out first" 阻塞重登；
+  401 时清 token + login 直接覆盖旧 token。
+- **[P2] 首个注册用户自动 admin（R-10）**：注册硬编码 member 且无任何提权端点，
+  /admin/* 与 RBAC 需手工 SQL 才可用。
+- **[P2] /sync 属主校验（R-18）**：Get 返回任意 DB 错误时静默跳过租户校验放行；
+  现仅 ErrMeetingNotFound 放行（未知 id 建审计行），其余 500。
+- **[P2] Deepgram（R-12）**：请求现携带 per-meeting language（FR-TR-15）；分段置信度
+  均值用各词自身值（此前用最后一个词的值）。
+- **[P2] 设置页诚实标注（R-11）**：无实现的 STT/LLM 选项标注 "not yet available"
+  并禁用；本地转写错误信息携带用户实际选择的 provider 名。新增 rule_based 选项。
+- **[P2] 监听文件夹持久化（R-15）**：start/stop 现写 watch_folder_enabled/path
+  （此前字段零使用，重启丢失）。
+- **[P2] ratelimit 注释与实现对齐（R-17）**。
+
+### Security / 诚实披露
+- **[P0→披露] R-1 数据落盘加密范围**：仅凭据（API key）为 AES-256-GCM；会议音频/
+  转写/摘要当前明文存于 ~/RecapData。全库加密（SQLCipher + inbox 加密 + 管线透明
+  解密）列 V1.7——半启用的加密（管线读不回）比当前诚实状态更糟。README 与
+  KNOWN_LIMITATIONS.md 已精确标注范围与 OS 层缓解（FileVault/BitLocker）。
+
+### Deferred（V1.7）
+- R-13 Whisper 25MB 分段、R-14 提示词模板接入管线、R-16 桌面离线队列、R-19 watch
+  轮询移出回调线程——登记于根仓库 REVIEW_ROUND6_DISCUSSION.md §三。
+
 ## [Unreleased] - 2026-10-08（上线前深度审查轮）
 
 ### Fixed — team-server (Go)

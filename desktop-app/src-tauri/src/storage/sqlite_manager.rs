@@ -171,12 +171,20 @@ impl SqliteManager {
         })
     }
 
+    /// R-6: full-text search over transcripts — the join previously matched
+    /// the wrong rowid and the FTS index was never populated, so this always
+    /// returned empty. save_transcript_segments now maintains the index.
     pub fn search_transcripts(&self, query: &str, limit: i64) -> Result<Vec<(Uuid, String)>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, ts.text FROM transcript_search ts
-             JOIN transcript_segments tseg ON ts.rowid = tseg.rowid
+            "SELECT m.id, highlight(transcript_search, 0, '【', '】')
+             FROM transcript_search
+             JOIN transcript_segments tseg ON tseg.id = transcript_search.rowid
              JOIN meetings m ON tseg.meeting_id = m.id
              WHERE transcript_search MATCH ?1
+             ORDER BY rank
              LIMIT ?2"
         )?;
 
@@ -263,6 +271,26 @@ impl SqliteManager {
     /// so a crash cannot leave the meeting with a half-written transcript.
     pub fn save_transcript_segments(&self, meeting_id: Uuid, segments: &[TranscriptSegment]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        // R-6: external-content FTS5 needs explicit index maintenance — the
+        // index was never populated, so transcript search returned nothing.
+        // Retire the meeting's old rows from the index before replacing them.
+        {
+            let mut stmt = tx.prepare(
+                "SELECT ts.id, ts.text FROM transcript_segments ts WHERE ts.meeting_id = ?1",
+            )?;
+            let old_rows: Vec<(i64, String)> = {
+                let rows = stmt.query_map(params![meeting_id.to_string()], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+            for (rowid, text) in old_rows {
+                let _ = tx.execute(
+                    "INSERT INTO transcript_search(transcript_search, rowid, text) VALUES('delete', ?1, ?2)",
+                    params![rowid, text],
+                );
+            }
+        }
         tx.execute("DELETE FROM transcript_segments WHERE meeting_id = ?1", params![meeting_id.to_string()])?;
         for seg in segments {
             tx.execute(
@@ -280,6 +308,11 @@ impl SqliteManager {
                 ],
             )?;
         }
+        // R-6: index the new rows so search finds them immediately.
+        tx.execute(
+            "INSERT INTO transcript_search(rowid, text) SELECT id, text FROM transcript_segments WHERE meeting_id = ?1",
+            params![meeting_id.to_string()],
+        )?;
         tx.commit()?;
         Ok(())
     }

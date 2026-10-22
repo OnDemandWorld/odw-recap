@@ -74,13 +74,14 @@ impl LLMProvider for OpenAIProvider {
         let model = config.model.unwrap_or_else(|| "gpt-3.5-turbo".to_string());
 
         let prompt = format!(
-            "Summarize the following text in {} words or less. {}\n\n{}",
+            "Summarize the following text in {} words or less. {}{}\n\n{}",
             config.max_length / 5,
             if config.include_action_items {
                 "Extract action items."
             } else {
                 ""
             },
+            crate::summarization::llm_provider::STRUCTURED_OUTPUT_INSTRUCTION,
             text
         );
 
@@ -127,13 +128,12 @@ impl LLMProvider for OpenAIProvider {
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
 
-        Ok(SummarizationResult {
-            summary,
-            action_items: Vec::new(),
-            decisions: Vec::new(),
-            key_points: Vec::new(),
-            provider: "openai".to_string(),
-        })
+        // R-3: parse the structured JSON the prompt requests; a non-JSON
+        // reply falls back to rule-based extraction so action items (and the
+        // Recap→Loop webhook chain) never silently vanish.
+        Ok(crate::summarization::llm_provider::parse_structured_summary(
+            &summary, "openai",
+        ))
     }
 
     fn supported_models(&self) -> Vec<String> {

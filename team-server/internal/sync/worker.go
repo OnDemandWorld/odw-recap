@@ -81,6 +81,10 @@ func (w *QueueWorker) processOnce(ctx context.Context) {
 	}
 }
 
+// claimLease bounds how long a claimed row stays invisible to other replicas
+// before its lease expires and it becomes re-claimable (crashed worker safety).
+const claimLease = 10 * time.Minute
+
 func (w *QueueWorker) claim(ctx context.Context) ([]queueRow, error) {
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -95,6 +99,7 @@ func (w *QueueWorker) claim(ctx context.Context) ([]queueRow, error) {
 		  AND (
 			(status = 'failed' AND retry_count < $1)
 		 OR (status = 'pending' AND created_at < NOW() - $2::interval)
+		 OR (status = 'processing')
 		  )
 		ORDER BY created_at ASC
 		LIMIT $3
@@ -115,6 +120,22 @@ func (w *QueueWorker) claim(ctx context.Context) ([]queueRow, error) {
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	// R-7: mark claimed rows 'processing' with a lease BEFORE releasing the
+	// transaction — the previous commit-then-forward released the row lock
+	// immediately, so a second replica re-claimed (and re-forwarded, e.g.
+	// duplicate Vault uploads) the same rows during the first one's 60s
+	// forwarding window.
+	if len(claimed) > 0 {
+		ids := make([]int64, 0, len(claimed))
+		for _, r := range claimed {
+			ids = append(ids, r.id)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE sync_queue SET status = 'processing', next_attempt_at = NOW() + $1::interval
+			 WHERE id = ANY($2)`, claimLease.String(), ids); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

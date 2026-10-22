@@ -61,6 +61,38 @@
     document.querySelector("#import-file-btn").addEventListener("click", importAudioFile);
     document.querySelector("#refresh-btn").addEventListener("click", loadMeetings);
 
+    // R-6: transcript full-text search (Enter to run).
+    const searchEl = document.querySelector("#transcript-search");
+    searchEl.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter") return;
+      const query = searchEl.value.trim();
+      if (!query) {
+        loadMeetings();
+        return;
+      }
+      try {
+        setStatus(`Searching transcripts for "${query}"…`);
+        const hits = await invoke("search_transcripts", { query, limit: 20 });
+        if (!hits.length) {
+          meetingListEl.innerHTML = `<p class="empty-state">No transcript matches for "${escapeHtml(query)}".</p>`;
+        } else {
+          meetingListEl.innerHTML = hits
+            .map(
+              (h) =>
+                `<div class="meeting-card" data-id="${escapeHtml(h.meeting_id)}" style="cursor:pointer">` +
+                `<div class="snippet">…${escapeHtml(h.snippet)}…</div></div>`
+            )
+            .join("");
+          meetingListEl.querySelectorAll(".meeting-card").forEach((card) => {
+            card.addEventListener("click", () => viewMeetingDetails(card.dataset.id));
+          });
+        }
+        setStatus(`${hits.length} transcript match${hits.length === 1 ? "" : "es"}`);
+      } catch (error) {
+        setStatus(`Search failed: ${error}`);
+      }
+    });
+
     // Settings
     document.querySelector("#save-api-keys-btn").addEventListener("click", saveApiKeys);
     document.querySelector("#save-template-btn").addEventListener("click", savePromptTemplate);

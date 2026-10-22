@@ -18,11 +18,15 @@ pub struct AudioInputManager {
 }
 
 /// Copy a discovered audio file into the inbox and create a matching meeting
-/// record so it shows up in the library immediately.
+/// record so it shows up in the library immediately. The STT/LLM providers come
+/// from Settings (R-4) — hardcoded 'whisper_local' made every watch-folder and
+/// upload import fail transcription with "not available yet".
 pub fn import_discovered_file(
     storage: &Arc<Mutex<StorageManager>>,
     inbox_path: &Path,
     source_path: &Path,
+    stt_provider: &str,
+    llm_provider: &str,
 ) -> Result<String> {
     let manager = AudioInputManager::new(storage.clone(), inbox_path.to_path_buf());
     manager.validate_file(source_path)?;
@@ -39,32 +43,61 @@ pub fn import_discovered_file(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "Watched folder recording".to_string());
-    let size = std::fs::metadata(&dest_path).map(|m| m.len() as i64).unwrap_or(0);
+
+    create_meeting_for_inbox_file(
+        storage,
+        &dest_path,
+        &title,
+        &ext,
+        crate::storage::types::AudioSource::WatchFolder,
+        stt_provider,
+        llm_provider,
+    )
+}
+
+/// Create the library meeting row for an inbox audio file (R-2): shared by the
+/// watch-folder importer and the LAN HTTP upload server so an uploaded file
+/// becomes a REAL meeting instead of an orphan file with a fake id.
+pub fn create_meeting_for_inbox_file(
+    storage: &Arc<Mutex<StorageManager>>,
+    dest_path: &Path,
+    title: &str,
+    ext: &str,
+    source: crate::storage::types::AudioSource,
+    stt_provider: &str,
+    llm_provider: &str,
+) -> Result<String> {
+    let size = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
+    let now = chrono::Utc::now().timestamp_millis();
 
     let meeting = crate::storage::types::Meeting {
         id: Uuid::new_v4(),
-        title: Some(title.clone()),
-        started_at: chrono::Utc::now().timestamp_millis(),
+        title: Some(title.to_string()),
+        started_at: now,
         ended_at: None,
         duration_seconds: None,
         status: crate::storage::types::MeetingStatus::Recording,
-        audio_file_path: dest_path,
-        audio_format: ext,
+        audio_file_path: dest_path.to_path_buf(),
+        audio_format: ext.to_string(),
         audio_size_bytes: size,
         model_used: "unknown".to_string(),
-        tags: vec!["watch_folder".to_string()],
+        tags: vec![match source {
+            crate::storage::types::AudioSource::WatchFolder => "watch_folder",
+            _ => "phone_upload",
+        }
+        .to_string()],
         folder_id: None,
-        created_at: chrono::Utc::now().timestamp_millis(),
-        updated_at: chrono::Utc::now().timestamp_millis(),
+        created_at: now,
+        updated_at: now,
         sync_status: crate::storage::types::SyncStatus::NotSynced,
         meeting_type: Some("team_meeting".to_string()),
         location: None,
         participants: Vec::new(),
         language: "en".to_string(),
         topic: None,
-        audio_source: crate::storage::types::AudioSource::WatchFolder,
-        stt_provider: "whisper_local".to_string(),
-        llm_provider: "rule_based".to_string(),
+        audio_source: source,
+        stt_provider: stt_provider.to_string(),
+        llm_provider: llm_provider.to_string(),
         prompt_template_used: None,
     };
     let meeting_id = meeting.id.to_string();
@@ -164,7 +197,13 @@ impl AudioInputManager {
     /// refresh. The watcher runs on notify's own thread; the initial
     /// `wait_for_file_stable` delay (a few seconds) before import is
     /// intentional, to avoid reading files that are still being written.
-    pub fn start_watch_folder<F>(&mut self, watch_path: PathBuf, mut on_imported: F) -> Result<()>
+    pub fn start_watch_folder<F>(
+        &mut self,
+        watch_path: PathBuf,
+        stt_provider: String,
+        llm_provider: String,
+        mut on_imported: F,
+    ) -> Result<()>
     where
         F: FnMut(String, String) + Send + 'static,
     {
@@ -176,7 +215,7 @@ impl AudioInputManager {
         let inbox = self.inbox_path.clone();
 
         let watcher = monitor.watch_with_callback(move |path| {
-            match import_discovered_file(&storage, &inbox, &path) {
+            match import_discovered_file(&storage, &inbox, &path, &stt_provider, &llm_provider) {
                 Ok(meeting_id) => {
                     let title = path
                         .file_stem()
@@ -206,13 +245,24 @@ impl AudioInputManager {
 
     /// Start the LAN upload server on a background task and return its
     /// user-facing URL (token included).
-    pub fn start_http_server(&mut self, port: u16) -> Result<String> {
+    pub fn start_http_server(
+        &mut self,
+        port: u16,
+        stt_provider: String,
+        llm_provider: String,
+    ) -> Result<String> {
         if self.http_server.is_some() {
             return Err(RecapError::AudioInput(
                 "HTTP upload server is already running".to_string(),
             ));
         }
-        let server = http_upload_server::HttpUploadServer::new(port, self.inbox_path.clone())?;
+        let server = http_upload_server::HttpUploadServer::new(
+            port,
+            self.inbox_path.clone(),
+            self.storage.clone(),
+            stt_provider,
+            llm_provider,
+        )?;
         let url = server.upload_url();
         let token = server.token().to_string();
 

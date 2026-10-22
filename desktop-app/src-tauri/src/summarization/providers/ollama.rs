@@ -58,8 +58,9 @@ impl LLMProvider for OllamaProvider {
         let model = config.model.unwrap_or_else(|| "llama2".to_string());
 
         let prompt = format!(
-            "Summarize the following text in {} words or less:\n\n{}",
+            "Summarize the following text in {} words or less.{}\n\n{}",
             config.max_length / 5,
+            crate::summarization::llm_provider::STRUCTURED_OUTPUT_INSTRUCTION,
             text
         );
 

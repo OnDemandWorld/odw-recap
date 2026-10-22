@@ -147,6 +147,34 @@ fn get_meeting(id: String, state: State<AppState>) -> Result<Meeting> {
         .ok_or_else(|| crate::error::RecapError::Storage(format!("Meeting not found: {}", id)))
 }
 
+#[derive(serde::Serialize)]
+struct TranscriptSearchHit {
+    meeting_id: String,
+    snippet: String,
+}
+
+/// R-6: transcript full-text search — previously the FTS index was never
+/// populated and no command exposed search at all.
+#[tauri::command]
+fn search_transcripts(
+    query: String,
+    limit: Option<i64>,
+    state: State<AppState>,
+) -> Result<Vec<TranscriptSearchHit>> {
+    let storage = state
+        .storage
+        .lock()
+        .map_err(|_| crate::error::RecapError::Storage("Failed to lock storage".to_string()))?;
+    let hits = storage.search_transcripts(&query, limit.unwrap_or(20).max(1))?;
+    Ok(hits
+        .into_iter()
+        .map(|(id, snippet)| TranscriptSearchHit {
+            meeting_id: id.to_string(),
+            snippet,
+        })
+        .collect())
+}
+
 #[tauri::command]
 fn delete_meeting(id: String, state: State<AppState>) -> Result<()> {
     let meeting_id = parse_meeting_id(&id)?;
@@ -196,11 +224,24 @@ fn start_watch_folder(
         )));
     }
 
+    // R-15: persist the watch folder so it survives restarts (previously the
+    // setting existed in config but was never written).
+    {
+        let config = lock_config(&state)?;
+        config.set("watch_folder_enabled", &true)?;
+        config.set("watch_folder_path", &path)?;
+    }
+
+    let (stt_provider, llm_provider) = {
+        let config = lock_config(&state)?;
+        (config.stt_provider()?, config.llm_provider()?)
+    };
+
     let mut audio = state
         .audio
         .lock()
         .map_err(|_| crate::error::RecapError::AudioInput("Failed to lock audio manager".to_string()))?;
-    audio.start_watch_folder(watch_path, move |meeting_id, title| {
+    audio.start_watch_folder(watch_path, stt_provider, llm_provider, move |meeting_id, title| {
         use tauri::Manager;
         if let Err(e) = app.emit_all("meeting-imported", serde_json::json!({
             "meeting_id": meeting_id,
@@ -215,6 +256,10 @@ fn start_watch_folder(
 
 #[tauri::command]
 fn stop_watch_folder(state: State<AppState>) -> Result<bool> {
+    {
+        let config = lock_config(&state)?;
+        config.set("watch_folder_enabled", &false)?;
+    }
     let mut audio = state
         .audio
         .lock()
@@ -401,7 +446,13 @@ fn start_http_upload_server(state: State<AppState>) -> Result<UploadServerInfo> 
         .audio
         .lock()
         .map_err(|_| crate::error::RecapError::AudioInput("Failed to lock audio manager".to_string()))?;
-    let url = audio.start_http_server(port)?;
+    // R-2/R-4: uploads honour the Settings-configured providers instead of
+    // hardcoded whisper_local/rule_based (which failed transcription).
+    let (stt_provider, llm_provider) = {
+        let config = lock_config(&state)?;
+        (config.stt_provider()?, config.llm_provider()?)
+    };
+    let url = audio.start_http_server(port, stt_provider, llm_provider)?;
     let token = audio
         .http_server_token()
         .unwrap_or_default()
@@ -500,6 +551,7 @@ fn main() {
             greet,
             create_meeting,
             list_meetings,
+            search_transcripts,
             get_meeting,
             delete_meeting,
             get_transcript,

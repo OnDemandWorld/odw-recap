@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-// loginRateLimit and loginRateWindow bound failed login attempts per client:
-// at most loginRateLimit attempts inside loginRateWindow. Successful logins
-// do not consume budget; the handler only records failures.
+// loginRateLimit and loginRateWindow bound login ATTEMPTS per client: at most
+// loginRateLimit calls inside loginRateWindow. Every attempt (successful or
+// not) passes through Allow() and consumes budget — a stricter but simpler
+// contract than failure-only accounting, and sufficient for single-tenant
+// self-hosting.
 const (
 	loginRateLimit  = 10
 	loginRateWindow = time.Minute

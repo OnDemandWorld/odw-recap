@@ -32,12 +32,13 @@ pub struct ProcessOutcome {
     pub summary_provider: String,
 }
 
-/// UI-facing provider names map to concrete STT implementations.
-fn stt_provider_id(selected: &str) -> &'static str {
+/// UI-facing provider names map to concrete STT implementations. `None` means
+/// the selected provider has no implementation yet.
+fn stt_provider_id(selected: &str) -> Option<&'static str> {
     match selected {
-        "openai" | "openai_whisper" => "openai_whisper",
-        "deepgram" => "deepgram",
-        _ => "local",
+        "openai" | "openai_whisper" => Some("openai_whisper"),
+        "deepgram" => Some("deepgram"),
+        _ => None,
     }
 }
 
@@ -51,13 +52,18 @@ async fn transcribe(
     language: &str,
 ) -> Result<(Vec<TranscriptSegment>, String)> {
     let provider_id = stt_provider_id(selected);
-    if provider_id == "local" {
-        return Err(RecapError::Transcription(
-            "Local transcription (whisper.cpp) is not available yet. Open Settings and \
-             choose OpenAI or Deepgram as the STT provider and save its API key."
-                .to_string(),
-        ));
-    }
+    let provider_id = match provider_id {
+        Some(id) => id,
+        // R-11: name the provider the user actually selected — a Deepgram
+        // picker previously errored with a whisper.cpp message.
+        None => {
+            return Err(RecapError::Transcription(format!(
+                "The STT provider \"{}\" is not available yet. Open Settings and choose \
+                 OpenAI Whisper or Deepgram, and save the matching API key.",
+                selected
+            )));
+        }
+    };
 
     let api_key = {
         let storage = storage.lock().map_err(|_| lock_err())?;
@@ -234,7 +240,7 @@ async fn run_pipeline(
         status: MeetingStatus::Completed.to_string(),
         segments: segments.len(),
         duration_seconds,
-        stt_provider: stt_provider_id(stt_selected).to_string(),
+        stt_provider: stt_provider_id(stt_selected).unwrap_or("unavailable").to_string(),
         summary_provider,
     })
 }

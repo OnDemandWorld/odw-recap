@@ -74,8 +74,9 @@ impl LLMProvider for AnthropicProvider {
         let model = config.model.unwrap_or_else(|| "claude-3-sonnet-20240229".to_string());
 
         let prompt = format!(
-            "Summarize the following text in {} words or less:\n\n{}",
+            "Summarize the following text in {} words or less.{}\n\n{}",
             config.max_length / 5,
+            crate::summarization::llm_provider::STRUCTURED_OUTPUT_INSTRUCTION,
             text
         );
 
@@ -123,13 +124,9 @@ impl LLMProvider for AnthropicProvider {
             .map(|c| c.text.clone())
             .unwrap_or_default();
 
-        Ok(SummarizationResult {
-            summary,
-            action_items: Vec::new(),
-            decisions: Vec::new(),
-            key_points: Vec::new(),
-            provider: "anthropic".to_string(),
-        })
+        Ok(crate::summarization::llm_provider::parse_structured_summary(
+            &summary, "anthropic",
+        ))
     }
 
     fn supported_models(&self) -> Vec<String> {

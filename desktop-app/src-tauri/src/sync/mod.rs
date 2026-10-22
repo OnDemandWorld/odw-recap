@@ -41,12 +41,10 @@ impl SyncEngine {
     pub async fn login(&self, email: &str, password: &str) -> Result<String> {
         // Clone a client snapshot (reqwest::Client is an Arc handle) so the
         // MutexGuard never spans an await — guards are !Send.
+        // R-9: allow re-login with an existing (possibly EXPIRED) token —
+        // previously users hit "already logged in — log out first" after the
+        // 24h JWT expiry with no way to know why syncs were failing.
         let snapshot = self.lock()?.clone();
-        if snapshot.has_token() {
-            return Err(RecapError::Sync(
-                "already logged in — log out first".to_string(),
-            ));
-        }
         let token = snapshot.login(email, password).await?;
         self.lock()?.set_token(Some(token.clone()));
         Ok(token)
@@ -70,8 +68,17 @@ impl SyncEngine {
         summary_data: serde_json::Value,
     ) -> Result<client::SyncResponse> {
         let snapshot = self.lock()?.clone();
-        snapshot
+        let result = snapshot
             .sync_meeting(meeting_id, meeting_data, transcript_data, summary_data)
-            .await
+            .await;
+        // R-9: a 401 means the JWT expired — drop it so the UI forces a fresh
+        // login instead of retrying a dead token forever (previously the stale
+        // token also BLOCKED re-login with "log out first").
+        if let Err(RecapError::Sync(msg)) = &result {
+            if msg.contains("HTTP 401") {
+                let _ = self.lock().map(|mut inner| inner.set_token(None));
+            }
+        }
+        result
     }
 }
