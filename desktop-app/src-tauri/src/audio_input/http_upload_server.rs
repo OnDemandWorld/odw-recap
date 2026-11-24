@@ -130,14 +130,28 @@ impl HttpUploadServer {
 /// Authorize the request: token must be present either as the `token` query
 /// parameter or the `X-Upload-Token` header.
 fn authorized(query: &HashMap<String, String>, headers: &axum::http::HeaderMap, token: &str) -> bool {
-    if query.get("token").map(String::as_str) == Some(token) {
+    if query.get("token").map(|t| ct_eq(t.as_bytes(), token.as_bytes())).unwrap_or(false) {
         return true;
     }
     headers
         .get("X-Upload-Token")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v == token)
+        .map(|v| ct_eq(v.as_bytes(), token.as_bytes()))
         .unwrap_or(false)
+}
+
+/// Audit #33: constant-time byte comparison so token matching does not leak a
+/// prefix-match timing side channel on the unauthenticated LAN service. Length
+/// is compared first (the token length is fixed/public).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 async fn upload_audio(
@@ -171,7 +185,7 @@ async fn upload_audio(
         let name = field.name().unwrap_or("").to_string();
         if name == "token" {
             if let Ok(value) = field.text().await {
-                if value == state.token {
+                if ct_eq(value.as_bytes(), state.token.as_bytes()) {
                     pre_authorized = true;
                 } else if !pre_authorized {
                     return Json(json!({
@@ -191,10 +205,13 @@ async fn upload_audio(
                 }));
             }
             let filename = field.file_name().unwrap_or("recording.m4a").to_string();
+            // Audit #34: do not default a missing extension to m4a — that let an
+            // extension-less part bypass the allowlist. An empty ext fails the
+            // SUPPORTED_EXTENSIONS check below.
             ext = PathBuf::from(&filename)
                 .extension()
                 .and_then(|e| e.to_str())
-                .unwrap_or("m4a")
+                .unwrap_or("")
                 .to_ascii_lowercase();
             file_data = Some(
                 field
@@ -344,5 +361,14 @@ mod tests {
     fn html_escape_covers_all_special_chars() {
         assert_eq!(html_escape("&<>\"'"), "&amp;&lt;&gt;&quot;&#x27;");
         assert_eq!(html_escape("plain-token-123"), "plain-token-123");
+    }
+
+    // Audit #33: constant-time token equality behaves correctly.
+    #[test]
+    fn ct_eq_matches_only_identical_tokens() {
+        assert!(ct_eq(b"abc-123", b"abc-123"));
+        assert!(!ct_eq(b"abc-123", b"abc-124"));
+        assert!(!ct_eq(b"abc", b"abcd"));
+        assert!(ct_eq(b"", b""));
     }
 }

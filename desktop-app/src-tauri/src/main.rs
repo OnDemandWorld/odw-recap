@@ -303,6 +303,12 @@ fn save_api_key(provider: String, key: String, state: State<AppState>) -> Result
     if provider.trim().is_empty() {
         return Err(crate::error::RecapError::Config("Provider name is required".to_string()));
     }
+    // Audit #37: reject an empty key — storing an encrypted empty string made
+    // has_api_key true and produced a confusing remote 401 instead of the
+    // actionable "No API key saved" message.
+    if key.trim().is_empty() {
+        return Err(crate::error::RecapError::Config("API key is required".to_string()));
+    }
     let storage = lock_storage(&state)?;
     storage.save_api_key(provider.trim(), &key)
 }
@@ -537,14 +543,17 @@ fn main() {
         inbox_path,
     );
 
+    // Audit #38: honor the persisted team-server URL at startup so the engine
+    // and the reported status agree after a restart (previously hardcoded to
+    // localhost until the next login reconfigured it).
+    let sync_server_url =
+        team_server_url(&config).unwrap_or_else(|_| TEAM_SERVER_URL_DEFAULT.to_string());
+
     let app_state = AppState {
         storage: app_storage,
         config: Arc::new(Mutex::new(config)),
         audio: Arc::new(Mutex::new(audio)),
-        sync: Arc::new(crate::sync::SyncEngine::new(
-            TEAM_SERVER_URL_DEFAULT.to_string(),
-            None,
-        )),
+        sync: Arc::new(crate::sync::SyncEngine::new(sync_server_url, None)),
     };
 
     tauri::Builder::default()
@@ -732,8 +741,11 @@ async fn sync_meeting_to_team_server(
         Ok(resp) => {
             let status = if resp.status == "synced" {
                 SyncStatus::Synced
-            } else if resp.status == "partial" {
-                // Forwarded with errors; the team-server queue worker retries.
+            } else if resp.status == "partial" || resp.status == "queued" {
+                // Audit #39: 'queued' (legacy queue-only mode) and 'partial'
+                // (forwarded with errors; the queue worker retries) are accepted
+                // in-progress outcomes, not failures. Previously 'queued' mapped
+                // to Failed.
                 SyncStatus::Syncing
             } else {
                 SyncStatus::Failed

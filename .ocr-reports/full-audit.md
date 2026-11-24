@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 62 · skipped 6 · reverted 0 · open 16
+- **Remediation progress:** fixed 67 · skipped 12 · reverted 0 · open 5
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 41 fixed
+## Low (61) — 46 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -214,30 +214,34 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Remove the 'directories' dependency and keep 'dirs' (or consolidate on one crate deliberately).
   - **Verification:** Removed the unused 'directories' crate from Cargo.toml (only dirs::home_dir is used); Cargo.lock regenerated and no longer contains directories. Verified: cd desktop-app/src-tauri && cargo test -> 28 passed; grep Cargo.lock 'name = "directories"' -> 0.
 
-- [ ] **#30** `bug` — Documented capture stubs fabricate success: stop_recording returns a path to a file that was never written
+- [ ] **#30** `bug` — Documented capture stubs fabricate success: stop_recording returns a path to a file that was never written — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/audio_capture/recorder.rs:40-91`
   - **Root cause:** Extra concrete risk beyond the documented cpal/loopback stub status: start_recording returns Ok without capturing anything, stop_recording returns Ok(path) for a file that does not exist (lines 60-76; system_audio.rs stop_capture lines 39-55 identical), and list_input_devices/list_system_audio_sources return hardcoded fake device names (recorder.rs 84-91, system_audio.rs 63-70). Any caller wiring these in would create meetings pointing at missing audio and fail later with a confusing 'Audio file not found' instead of an upfront 'capture not implemented' error. AudioCaptureManager/SystemAudioCapture are currently unreferenced from main.rs, so this is latent.
   - **Suggested fix:** Until cpal integration lands, return an actionable RecapError::AudioInput('audio capture not implemented yet') from start_recording/start_capture (or gate behind a feature flag) rather than Ok, and mark the device lists as unavailable.
+  - **Verification:** Skipped (documented integration-pending stub): audio_capture recorder/system_audio are explicit stubs (KNOWN_LIMITATIONS.md) unreferenced from main.rs. Converting their fabricated Ok to errors is reasonable hardening but touches dead-code capture structs (risking dead-code warnings) and is best done together with the real cpal/loopback integration. Recommended: return actionable 'not implemented' errors when capture is wired.
 
 - [ ] **#31** `error-handling` — Drag-drop batch import aborts on first failure, leaving earlier copied files orphaned
   - **Location:** `desktop-app/src-tauri/src/audio_input/file_importer.rs:12-30`
   - **Root cause:** import_from_drag_drop returns Err on the first failing file (lines 20-26) after previous files were already copied into the inbox by import_file. Those copies have no meeting rows (import_file only copies) and no rollback, so a single bad file in a multi-file drop leaves orphan audio in the inbox and the caller cannot tell which files succeeded. (FileImporter is currently unused by main.rs, which imports one file per command invocation, so impact is latent.)
   - **Suggested fix:** Collect per-file results and return a partial-success report (imported paths + per-file errors), or roll back previously copied files on failure; create meeting records atomically with the copy as import_discovered_file does.
 
-- [ ] **#32** `security` — Upload shared secret travels in cleartext HTTP query string on all interfaces
+- [ ] **#32** `security` — Upload shared secret travels in cleartext HTTP query string on all interfaces — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:124-131`
   - **Root cause:** upload_url() embeds the token in http://<lan-ip>:<port>/upload/audio?token=... and the server binds 0.0.0.0 with no TLS (intentional LAN design, documented in comments). Extra concrete risk beyond the documented design: any passive observer on the same L2/Wi-Fi network can sniff the token and then upload arbitrary content; the token also persists in browser history, and any intermediate proxy logs the full query string. Combined with the pre-auth buffering issue this makes the write endpoint reachable by anyone who has ever seen the URL.
   - **Suggested fix:** At minimum document the sniffing risk and rotate the token per upload session; preferably serve the LAN endpoint over TLS with a pinned self-signed cert (or a pairing QR containing a one-time token), and accept the token via header rather than query for the API path.
+  - **Verification:** Skipped (architectural): the LAN upload endpoint is cleartext HTTP by documented design; protecting the shared token in transit requires TLS (pinned self-signed cert) or a pairing QR with one-time tokens — infrastructure beyond a minimal scoped edit. Recommended: serve the LAN endpoint over TLS and accept the token via header rather than query.
 
-- [ ] **#33** `security` — Upload token compared with non-constant-time string equality
+- [x] **#33** `security` — Upload token compared with non-constant-time string equality — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:136-145`
   - **Root cause:** authorized() uses `==` on &str/String for the query token (line 137), header token (line 143) and the form token (line 196). These are byte-by-byte comparisons that short-circuit on first mismatch, leaking prefix-match timing. Practical remote exploitation against a 122-bit-random UUIDv4 over a LAN is infeasible, but the pattern is a timing-side-channel anti-pattern for a shared secret on an unauthenticated network service.
   - **Suggested fix:** Compare with a constant-time equality (e.g. subtle::ConstantTimeEq or ring::constant_time::verify_slices_are_equal) on the token bytes; hash both sides first if lengths differ.
+  - **Verification:** authorized() and the multipart form-token check now use a constant-time byte comparison (ct_eq) instead of short-circuiting ==, removing the prefix-match timing side channel on the LAN service. Verified: cd desktop-app/src-tauri && cargo test -> 35 passed incl. ct_eq_matches_only_identical_tokens; clippy no new warnings.
 
-- [ ] **#34** `security` — Extension allowlist bypassable: filename without extension defaults to m4a; no content validation
+- [x] **#34** `security` — Extension allowlist bypassable: filename without extension defaults to m4a; no content validation — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:180-185`
   - **Root cause:** ext is derived from the multipart filename with `.unwrap_or("m4a")` (line 184), so a part named e.g. `payload` (no extension) — or a missing file_name, which defaults to 'recording.m4a' — passes the SUPPORTED_EXTENSIONS check at line 220 regardless of actual content. Validation is extension-only with no magic-byte/MIME sniffing (AudioInputManager::validate_file in audio_input/mod.rs lines 161-177 is likewise extension-only), so arbitrary non-audio bytes can be stored in the inbox and later fed to STT decoders. The UUID destination name prevents path traversal, but the R-2 'reject unsupported extensions up front' guarantee is trivially bypassed.
   - **Suggested fix:** Reject filenames with no recognized extension instead of defaulting to m4a; validate the uploaded bytes' magic numbers (ftyp/RIFF/ID3/OggS/fLaC/EBML) against the claimed extension before writing.
+  - **Verification:** Upload extension extraction no longer defaults a missing extension to m4a (the unwrap_or fallback is now an empty string); an extension-less part fails the SUPPORTED_EXTENSIONS allowlist instead of bypassing it. Verified: cargo test -> 35 passed; clippy no new warnings. (Magic-byte content sniffing remains further hardening.)
 
 - [ ] **#35** `error-handling` — Upload written to disk before meeting registration; DB failure orphans the file, and all errors return HTTP 200
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:231-264`
@@ -249,20 +253,23 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** handle.abort.abort() cancels the axum serve task at whatever await point it is at. If an upload is mid tokio::fs::write (http_upload_server.rs line 233), the write future is dropped, leaving a partially written UUID.ext file in the inbox with no meeting row and no cleanup; there is no graceful shutdown draining in-flight requests. Similarly stop_watch_folder drops the watcher while a callback may still be mid wait_for_file_stable/import, so an import can land after 'stopped' was reported.
   - **Suggested fix:** Use axum::serve(...).with_graceful_shutdown(signal) triggered by stop_http_server; write uploads to a temp file and atomically rename on completion so aborted writes never leave visible partial files.
 
-- [ ] **#37** `error-handling` — save_api_key accepts an empty key, storing an encrypted empty string that later causes confusing cloud auth failures
+- [x] **#37** `error-handling` — save_api_key accepts an empty key, storing an encrypted empty string that later causes confusing cloud auth failures — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/main.rs:301-308`
   - **Root cause:** The command validates only that the provider name is non-empty; an empty key is encrypted and persisted. has_api_key then returns true and processing.rs proceeds to call OpenAI/Deepgram with an empty credential, producing a remote 401 instead of the actionable 'No API key saved' message the pipeline is designed to show.
   - **Suggested fix:** Reject keys that are empty/whitespace-only in save_api_key (mirroring the provider validation), or treat an empty decrypted key as absent in get_api_key.
+  - **Verification:** save_api_key rejects an empty/whitespace key with a Config error instead of storing an encrypted empty string that made has_api_key true and produced a confusing remote 401. Verified: cargo test -> 35 passed; clippy no new warnings. A command-level test needs a Tauri State<AppState> fixture (not added).
 
-- [ ] **#38** `bug` — SyncEngine is initialized with the hardcoded localhost default, ignoring the persisted team_server.url, so status and engine disagree after restart
+- [x] **#38** `bug` — SyncEngine is initialized with the hardcoded localhost default, ignoring the persisted team_server.url, so status and engine disagree after restart — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/main.rs:542-545`
   - **Root cause:** main() builds SyncEngine::new(TEAM_SERVER_URL_DEFAULT, None) even though team_server_login persists the chosen URL under team_server.url. After a restart, team_server_status reports the persisted (possibly remote) URL while the engine still points at http://localhost:8080 until the next login reconfigures it. Any code path that uses the engine without a fresh login targets the wrong server, and the UI shows a server the engine is not actually configured for.
   - **Suggested fix:** At startup, read team_server.url from ConfigManager and pass it to SyncEngine::new (falling back to the default only when unset).
+  - **Verification:** main() initializes SyncEngine from team_server_url(&config) (the persisted team_server.url) instead of the hardcoded localhost default, so the engine and reported status agree after restart. Verified: cargo test -> 35 passed; clippy no new warnings.
 
-- [ ] **#39** `bug` — Server sync status 'queued' is mapped to SyncStatus::Failed, and 'partial' leaves the meeting stuck in Syncing locally forever
+- [x] **#39** `bug` — Server sync status 'queued' is mapped to SyncStatus::Failed, and 'partial' leaves the meeting stuck in Syncing locally forever — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/main.rs:727-736`
   - **Root cause:** sync_meeting_to_team_server maps only 'synced' -> Synced and 'partial' -> Syncing; every other status becomes Failed. The team-server explicitly returns status 'queued' in legacy queue-only mode (sync_handlers.go, s.syncForwarder == nil branch), so a successfully accepted sync is recorded locally as Failed. For 'partial', the comment relies on the server queue worker retrying, but the desktop never polls or updates the row again, so the meeting remains 'Syncing' indefinitely in the local library.
   - **Suggested fix:** Treat 'queued' as an accepted/in-progress outcome (Syncing or a dedicated Queued status), and add a status-refresh path (poll server or re-check on app focus) for meetings left in Syncing after a partial result.
+  - **Verification:** sync_meeting_to_team_server maps server status 'queued' (legacy queue-only mode) and 'partial' to SyncStatus::Syncing (accepted/in-progress) instead of Failed. Verified: cargo test -> 35 passed; clippy no new warnings. Follow-up: a status-refresh path for meetings left Syncing after a 'partial' result (desktop never re-polls).
 
 - [ ] **#40** `concurrency` — process_meeting has no per-meeting in-flight guard, so concurrent invocations duplicate paid cloud STT/LLM calls and race status writes
   - **Location:** `desktop-app/src-tauri/src/processing.rs:160-194`
@@ -352,10 +359,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Update the default to a currently-served model id (e.g. claude-sonnet-4-5 or later per Anthropic's model list) and refresh supported_models; surface provider-fallback events to the UI instead of only stderr.
   - **Verification:** Anthropic default model changed from the retired claude-3-sonnet-20240229 to claude-sonnet-4-5; supported_models refreshed to current IDs (claude-sonnet-4-5, claude-opus-4-1, claude-3-5-haiku-latest) so the default path no longer 404s into a silent rule-based fallback. Verified: cd desktop-app/src-tauri && cargo test -> 32 passed; clippy no errors.
 
-- [ ] **#55** `bug` — Documented LLM stubs return Ok with fabricated summaries instead of actionable errors
+- [ ] **#55** `bug` — Documented LLM stubs return Ok with fabricated summaries instead of actionable errors — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/summarization/providers/llama_local.rs:37-49`
   - **Root cause:** Extra concrete risk beyond the documented stub status: llama_local returns 'Local LLM summary of N characters. This is a stub implementation.' as a successful SummarizationResult; google.rs lines 50-62, aws_bedrock.rs 63-75 and azure.rs 65-77 are identical. The text self-identifies as a stub, but the Ok(success) contract means any caller wiring these in would persist the placeholder as the meeting's real summary (provider field set to e.g. 'google') and sync it onward. Currently unreachable: processing.rs routes everything except openai/anthropic to the rule-based summarizer and the UI disables these options — hence Low.
   - **Suggested fix:** Return an actionable 'not implemented yet' Err from summarize() in all four stubs (mirroring the STT-side guard) so fabricated summaries can never be persisted as real output.
+  - **Verification:** Skipped (documented integration-pending stubs): llama_local/google/aws_bedrock/azure summarize return placeholder Ok; documented stubs currently unreachable (processing.rs routes non-openai/anthropic LLMs to the rule-based fallback). Recommended: return actionable 'not implemented' errors during real local/cloud LLM integration so fabricated summaries can never be persisted.
 
 - [x] **#56** `security` — Untrusted transcript interpolated into LLM prompt without delimiters; injected instructions can steer action items synced to Loop — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/summarization/providers/openai.rs:76-86`
@@ -417,20 +425,23 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Return an actionable RecapError::Transcription/Provider error when a successful HTTP response contains no transcript content (or surface a distinct 'no speech detected' outcome), so the pipeline marks the meeting Failed or flags it instead of Completed-with-nothing.
   - **Verification:** Deepgram returns an actionable RecapError::Transcription when a 200 response yields zero segments, instead of Ok(empty) that let the pipeline mark a meeting Completed with no content. Verified: cargo test -> 32 passed; clippy no new warnings.
 
-- [ ] **#66** `error-handling` — Client builder failure silently falls back to a default client with no timeout
+- [ ] **#66** `error-handling` — Client builder failure silently falls back to a default client with no timeout — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/transcription/providers/openai_whisper.rs:39-42`
   - **Root cause:** Every provider constructs reqwest::Client::builder().timeout(600s/300s).build().unwrap_or_default() (openai_whisper.rs 39-42, deepgram.rs 48-51, assemblyai.rs 41-44, aws_transcribe.rs 26-29, azure_speech.rs 20-23, google_stt.rs 18-21, openai.rs 39-42, anthropic.rs 39-42, ollama.rs 28-31, google.rs 15-18, aws_bedrock.rs 23-26, azure.rs 23-26). If build() fails (e.g. TLS backend initialization error), unwrap_or_default() yields a client with NO timeout, so a stalled connection hangs the transcription/summarization task indefinitely instead of failing after the intended deadline.
   - **Suggested fix:** Propagate the build error (return Result from new()) or at least log it and apply .timeout() to the fallback client; never silently drop the timeout configuration.
+  - **Verification:** Skipped (disproportionate multi-file refactor for a latent Low): the reqwest builder unwrap_or_default no-timeout fallback affects ~12 providers; the sync-client instance (#60) was fixed. Builder failure is exceedingly rare (TLS init). Recommended: a shared build_http_client(timeout) helper applied across all providers, propagating or logging build errors.
 
-- [ ] **#67** `bug` — Documented STT stubs return Ok with fabricated transcript segments instead of actionable errors
+- [ ] **#67** `bug` — Documented STT stubs return Ok with fabricated transcript segments instead of actionable errors — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/transcription/providers/whisper_local.rs:64-94`
   - **Root cause:** Extra concrete risk beyond the documented stub status: whisper_local returns two invented segments ('This is a stub transcription segment.', confidence 0.95, is_final=true, duration 6.0) as a successful TranscriptionResult; assemblyai.rs lines 85-102, aws_transcribe.rs 72-89, azure_speech.rs 60-77 and google_stt.rs 58-75 do the same with placeholder text and confidence 0.95. If any of these were registered, the pipeline would persist and team-server-sync placeholder transcripts as real meeting content with high confidence and mark the meeting Completed. Currently unreachable (processing.rs rejects non-cloud STT with an actionable error and the UI disables these options), hence Low — but the fake-success contract is a trap for the pending integrations.
   - **Suggested fix:** Make every unimplemented provider return Err(RecapError::Provider{message:'... not implemented yet'}) from transcribe() (as processing.rs already does at the router level) so no code path can persist fabricated transcripts; keep is_available()=false.
+  - **Verification:** Skipped (documented integration-pending stubs): whisper_local/assemblyai/aws_transcribe/azure_speech/google_stt transcribe return fabricated segments; documented stubs currently unreachable (processing.rs rejects non-cloud STT with an actionable error). Recommended: return actionable 'not implemented' errors during real STT integration.
 
-- [ ] **#68** `bug` — config.model conflated with provider name in routers while providers use the same field as the API model id
+- [ ] **#68** `bug` — config.model conflated with provider name in routers while providers use the same field as the API model id — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/transcription/stt_router.rs:42-48`
   - **Root cause:** STTRouter::transcribe selects the provider via config.model (line 42), and LLMRouter::summarize does the identical thing (llm_router.rs line 41). But OpenAIWhisperProvider sends config.model as the OpenAI API model (openai_whisper.rs line 96) and OpenAIProvider/AnthropicProvider/OllamaProvider send it as their API model id. The two semantics are mutually exclusive: setting model='whisper-1' fails routing ('Provider not found'), while setting model='openai_whisper' to route sends an invalid model to the API. Today processing.rs leaves model=None so the contradiction is latent, and config.llm_model ('llama-3-8b-instruct') is never plumbed into SummarizationConfig at all — users cannot actually choose a model.
   - **Suggested fix:** Add an explicit provider field (or route by meeting.stt_provider/llm_provider as processing.rs does) and reserve config.model for the engine model id; plumb config.llm_model through processing.rs into SummarizationConfig.model.
+  - **Verification:** Skipped (latent redesign): STTRouter/LLMRouter select the provider via config.model while providers use the same field as the API model id; today processing.rs leaves model=None so the contradiction is unreachable. Resolving it requires an explicit provider field plumbed through config + processing.rs (and config.llm_model wiring). Recommended: separate provider routing from the engine model id.
 
 - [x] **#69** `bug` — Inline style attributes are blocked by the configured CSP (style-src 'self' without 'unsafe-inline') — **FIXED**
   - **Location:** `desktop-app/src/index.html:37-42`
