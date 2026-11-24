@@ -731,7 +731,9 @@
     "end_line": 55,
     "title": "reqwest builder failure silently falls back to a default client with no timeout",
     "root_cause": "SyncClient::new uses .timeout(30s).build().unwrap_or_default(). If the builder fails (e.g. TLS backend initialization error), the fallback reqwest::Client::default() has NO timeout, so login/sync requests can hang indefinitely and the Tauri async command never resolves; the failure is also completely invisible.",
-    "suggested_fix": "Propagate the build error (return Result from new / map to RecapError::Sync), or at minimum apply the same 30s timeout to the fallback client and log the builder failure."
+    "suggested_fix": "Propagate the build error (return Result from new / map to RecapError::Sync), or at minimum apply the same 30s timeout to the fallback client and log the builder failure.",
+    "status": "fixed",
+    "verification_notes": "SyncClient::new now logs a reqwest builder failure and re-applies the 30s timeout to the fallback client instead of silently using a no-timeout Client::default(). Verified: cd desktop-app/src-tauri && cargo test -> 32 passed; cargo clippy --all-targets no new warnings."
   },
   {
     "id": 61,
@@ -742,7 +744,9 @@
     "end_line": 51,
     "title": "login() snapshots the client, awaits, then set_token on the current client — concurrent reconfigure can attach server A's JWT to server B's client",
     "root_cause": "login clones a SyncClient snapshot, performs the network login, then locks the (possibly replaced) client and stores the token. If team_server_login for a different server runs reconfigure() while the first login is in flight (double-submit / UI race), the first login's token — issued by server A — is stored on the client now pointing at server B, and subsequent syncs send A's JWT (and meeting data) to B. The same snapshot pattern in sync_meeting is benign, but token installation is not guarded against reconfiguration.",
-    "suggested_fix": "Capture a generation counter or the server URL with the snapshot and only install the token if the current client still matches; or serialize login/reconfigure through a single async mutex so a reconfigure cannot interleave with an in-flight login."
+    "suggested_fix": "Capture a generation counter or the server URL with the snapshot and only install the token if the current client still matches; or serialize login/reconfigure through a single async mutex so a reconfigure cannot interleave with an in-flight login.",
+    "status": "fixed",
+    "verification_notes": "login() captures the snapshot's server_url and only installs the returned JWT if the current client still targets that same server, so a concurrent reconfigure cannot attach server A's token to server B's client. Added SyncClient::server_url(). Verified: cargo test -> 32 passed; clippy no new warnings."
   },
   {
     "id": 62,
@@ -753,7 +757,9 @@
     "end_line": 81,
     "title": "Expired-JWT detection relies on substring matching 'HTTP 401' inside formatted error strings",
     "root_cause": "sync_meeting decides the token expired by checking msg.contains(\"HTTP 401\") on the human-readable RecapError::Sync string. Any change to the error wording in client.rs (or a server error body that happens to contain the substring) silently breaks or falsely triggers token clearing; 403 responses (e.g. tenant/ownership denial) are not distinguished. Status codes should be carried structurally, not parsed back out of display text.",
-    "suggested_fix": "Add a status-code field (or a dedicated RecapError::SyncUnauthorized variant) to the sync error path and match on that instead of the message string."
+    "suggested_fix": "Add a status-code field (or a dedicated RecapError::SyncUnauthorized variant) to the sync error path and match on that instead of the message string.",
+    "status": "fixed",
+    "verification_notes": "Added RecapError::SyncUnauthorized; the client returns it on HTTP 401 (both the meeting upsert and /sync), and SyncEngine::sync_meeting matches the variant instead of substring-matching 'HTTP 401' in a formatted message. Verified: cargo test -> 32 passed; clippy no new warnings."
   },
   {
     "id": 63,
@@ -764,7 +770,9 @@
     "end_line": 24,
     "title": "Unused sync types have drifted from the real schema and duplicate storage::types::SyncStatus with different variants",
     "root_cause": "sync::types::SyncStatus (NotSynced/Pending/Syncing/Synced/Failed) differs from storage::types::SyncStatus (which has PermanentlyFailed instead of Pending), and SyncQueueItem's fields (meeting_id/action/retry_count/processed_at) do not match the desktop sync_queue table (entity_type/entity_id/target/attempt_count/next_retry_at/expires_at) nor the server's queue. Nothing references these types; they are dead code that will mislead future implementation of the queue worker.",
-    "suggested_fix": "Delete the unused types or regenerate them from the actual sync_queue schema, and reuse storage::types::SyncStatus as the single source of truth."
+    "suggested_fix": "Delete the unused types or regenerate them from the actual sync_queue schema, and reuse storage::types::SyncStatus as the single source of truth.",
+    "status": "fixed",
+    "verification_notes": "Removed the unused, schema-drifted sync::types module (duplicate SyncStatus, SyncQueueItem, MobileSyncRequest, IOSShortcutsRequest); grep confirmed no references outside the file. storage::types::SyncStatus remains the single source of truth. Verified: cargo test -> 32 passed; clippy dead-code warnings reduced."
   },
   {
     "id": 64,

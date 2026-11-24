@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 48 · skipped 5 · reverted 0 · open 31
+- **Remediation progress:** fixed 52 · skipped 5 · reverted 0 · open 27
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 27 fixed
+## Low (61) — 31 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -372,25 +372,29 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** test_summary_is_non_empty_and_extractive claims 'every summary sentence must appear in the source text' but the sentence loop body is `let _ = sentence;` (lines 24-26) — it asserts nothing. Only the weaker word-membership check below runs, which would pass even for a reordered/recombined summary that is not truly extractive at sentence granularity.
   - **Suggested fix:** Assert each selected sentence (split on the same sentence boundaries the summarizer uses) is a substring of SAMPLE, or delete the dead loop and the misleading comment.
 
-- [ ] **#60** `error-handling` — reqwest builder failure silently falls back to a default client with no timeout
+- [x] **#60** `error-handling` — reqwest builder failure silently falls back to a default client with no timeout — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/sync/client.rs:52-55`
   - **Root cause:** SyncClient::new uses .timeout(30s).build().unwrap_or_default(). If the builder fails (e.g. TLS backend initialization error), the fallback reqwest::Client::default() has NO timeout, so login/sync requests can hang indefinitely and the Tauri async command never resolves; the failure is also completely invisible.
   - **Suggested fix:** Propagate the build error (return Result from new / map to RecapError::Sync), or at minimum apply the same 30s timeout to the fallback client and log the builder failure.
+  - **Verification:** SyncClient::new now logs a reqwest builder failure and re-applies the 30s timeout to the fallback client instead of silently using a no-timeout Client::default(). Verified: cd desktop-app/src-tauri && cargo test -> 32 passed; cargo clippy --all-targets no new warnings.
 
-- [ ] **#61** `concurrency` — login() snapshots the client, awaits, then set_token on the current client — concurrent reconfigure can attach server A's JWT to server B's client
+- [x] **#61** `concurrency` — login() snapshots the client, awaits, then set_token on the current client — concurrent reconfigure can attach server A's JWT to server B's client — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/sync/mod.rs:41-51`
   - **Root cause:** login clones a SyncClient snapshot, performs the network login, then locks the (possibly replaced) client and stores the token. If team_server_login for a different server runs reconfigure() while the first login is in flight (double-submit / UI race), the first login's token — issued by server A — is stored on the client now pointing at server B, and subsequent syncs send A's JWT (and meeting data) to B. The same snapshot pattern in sync_meeting is benign, but token installation is not guarded against reconfiguration.
   - **Suggested fix:** Capture a generation counter or the server URL with the snapshot and only install the token if the current client still matches; or serialize login/reconfigure through a single async mutex so a reconfigure cannot interleave with an in-flight login.
+  - **Verification:** login() captures the snapshot's server_url and only installs the returned JWT if the current client still targets that same server, so a concurrent reconfigure cannot attach server A's token to server B's client. Added SyncClient::server_url(). Verified: cargo test -> 32 passed; clippy no new warnings.
 
-- [ ] **#62** `maintainability` — Expired-JWT detection relies on substring matching 'HTTP 401' inside formatted error strings
+- [x] **#62** `maintainability` — Expired-JWT detection relies on substring matching 'HTTP 401' inside formatted error strings — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/sync/mod.rs:74-81`
   - **Root cause:** sync_meeting decides the token expired by checking msg.contains("HTTP 401") on the human-readable RecapError::Sync string. Any change to the error wording in client.rs (or a server error body that happens to contain the substring) silently breaks or falsely triggers token clearing; 403 responses (e.g. tenant/ownership denial) are not distinguished. Status codes should be carried structurally, not parsed back out of display text.
   - **Suggested fix:** Add a status-code field (or a dedicated RecapError::SyncUnauthorized variant) to the sync error path and match on that instead of the message string.
+  - **Verification:** Added RecapError::SyncUnauthorized; the client returns it on HTTP 401 (both the meeting upsert and /sync), and SyncEngine::sync_meeting matches the variant instead of substring-matching 'HTTP 401' in a formatted message. Verified: cargo test -> 32 passed; clippy no new warnings.
 
-- [ ] **#63** `maintainability` — Unused sync types have drifted from the real schema and duplicate storage::types::SyncStatus with different variants
+- [x] **#63** `maintainability` — Unused sync types have drifted from the real schema and duplicate storage::types::SyncStatus with different variants — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/sync/types.rs:4-24`
   - **Root cause:** sync::types::SyncStatus (NotSynced/Pending/Syncing/Synced/Failed) differs from storage::types::SyncStatus (which has PermanentlyFailed instead of Pending), and SyncQueueItem's fields (meeting_id/action/retry_count/processed_at) do not match the desktop sync_queue table (entity_type/entity_id/target/attempt_count/next_retry_at/expires_at) nor the server's queue. Nothing references these types; they are dead code that will mislead future implementation of the queue worker.
   - **Suggested fix:** Delete the unused types or regenerate them from the actual sync_queue schema, and reuse storage::types::SyncStatus as the single source of truth.
+  - **Verification:** Removed the unused, schema-drifted sync::types module (duplicate SyncStatus, SyncQueueItem, MobileSyncRequest, IOSShortcutsRequest); grep confirmed no references outside the file. storage::types::SyncStatus remains the single source of truth. Verified: cargo test -> 32 passed; clippy dead-code warnings reduced.
 
 - [ ] **#64** `bug` — Language interpolated into Deepgram URL query without percent-encoding
   - **Location:** `desktop-app/src-tauri/src/transcription/providers/deepgram.rs:95-102`

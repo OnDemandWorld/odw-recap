@@ -24,6 +24,11 @@ pub enum RecapError {
     #[error("Sync error: {0}")]
     Sync(String),
 
+    // Audit #62: structural 401 signal so callers match a variant instead of
+    // substring-matching "HTTP 401" inside a formatted message.
+    #[error("Sync unauthorized (token expired or invalid)")]
+    SyncUnauthorized,
+
     #[error("Provider error ({provider}): {message}")]
     Provider { provider: String, message: String },
 
