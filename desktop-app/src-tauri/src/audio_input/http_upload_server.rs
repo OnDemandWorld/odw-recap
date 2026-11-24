@@ -7,7 +7,6 @@ use axum::{
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -69,7 +68,11 @@ impl HttpUploadServer {
     /// Bind and serve until the task is aborted. Runs on the caller's async
     /// runtime (tauri::async_runtime::spawn) — failures are returned, never
     /// unwrapped, so a busy port surfaces as an error instead of a panic.
-    pub async fn run(self) -> Result<()> {
+    /// Serve on an already-bound listener. Audit #9: the caller binds the
+    /// socket synchronously so a busy port surfaces as an error from
+    /// start_http_server instead of being logged inside a detached task while
+    /// the UI shows a URL for a server that never started.
+    pub async fn run_with_listener(self, listener: tokio::net::TcpListener) -> Result<()> {
         let state = UploadState {
             inbox_path: self.inbox_path,
             token: self.token,
@@ -84,13 +87,6 @@ impl HttpUploadServer {
             .route("/upload/audio", get(upload_page).post(upload_audio))
             .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
             .with_state(state);
-
-        // 0.0.0.0 is intentional: the whole feature is "upload from another
-        // device on the local network". Access is gated by the token.
-        let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| RecapError::AudioInput(format!("Failed to bind HTTP server: {}", e)))?;
 
         axum::serve(listener, app)
             .await
@@ -150,16 +146,19 @@ async fn upload_audio(
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    // NOTE: the browser upload page posts the token as a multipart form
-    // field, so the final authorization verdict runs after parsing below.
+    // Audit #6: authorize BEFORE buffering the file body (up to 500 MiB).
+    // Previously the whole multipart was buffered and only then checked, so an
+    // unauthenticated LAN device could exhaust memory with concurrent large
+    // bodies. Query/header token is checked up front; the browser form posts
+    // the token as its first field, so we validate it on arrival and refuse to
+    // read any file bytes until authorized.
+    let mut pre_authorized = authorized(&query, &headers, &state.token);
 
     let mut file_data: Option<Result<Vec<u8>>> = None;
     let mut ext = "m4a".to_string();
-    let mut form_token = String::new();
 
     // Multipart errors are surfaced (previously .ok() swallowed them into a
-    // misleading "No file provided"). Stream field bytes rather than
-    // buffering: multipart errors propagate with their real cause.
+    // misleading "No file provided").
     while let Some(field) = match multipart.next_field().await {
         Ok(f) => f,
         Err(e) => {
@@ -172,11 +171,25 @@ async fn upload_audio(
         let name = field.name().unwrap_or("").to_string();
         if name == "token" {
             if let Ok(value) = field.text().await {
-                form_token = value;
+                if value == state.token {
+                    pre_authorized = true;
+                } else if !pre_authorized {
+                    return Json(json!({
+                        "status": "error",
+                        "message": "Invalid or missing upload token"
+                    }));
+                }
             }
             continue;
         }
         if name == "file" {
+            if !pre_authorized {
+                // Reject before allocating the body — no unauthenticated buffering.
+                return Json(json!({
+                    "status": "error",
+                    "message": "Invalid or missing upload token"
+                }));
+            }
             let filename = field.file_name().unwrap_or("recording.m4a").to_string();
             ext = PathBuf::from(&filename)
                 .extension()
@@ -193,7 +206,7 @@ async fn upload_audio(
         }
     }
 
-    if !authorized(&query, &headers, &state.token) && form_token != state.token {
+    if !pre_authorized {
         return Json(json!({
             "status": "error",
             "message": "Invalid or missing upload token"

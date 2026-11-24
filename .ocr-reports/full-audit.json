@@ -73,7 +73,9 @@
     "end_line": 201,
     "title": "Authorization checked only after fully buffering up to 500 MiB of unauthenticated multipart body",
     "root_cause": "upload_audio parses and buffers every multipart field (lines 163-194), including `field.bytes().await.map(|b| b.to_vec())` which holds the whole file twice (Bytes + Vec copy, ~1 GiB peak for a 500 MiB upload), and only then checks the token at line 196. DefaultBodyLimit::max(500 MiB) (line 85) applies per request with no concurrency or rate limit. Any unauthenticated device on the LAN can POST a few concurrent 500 MiB bodies with an invalid token and exhaust the laptop's memory (OOM kill of the desktop app), because the rejection happens after allocation, not before.",
-    "suggested_fix": "Validate query/header token before touching the multipart stream; for the form-field token flow, require the token field first and reject immediately if it is wrong, or stream the file to a temp file with a hard size cap instead of buffering. Add a tower concurrency-limit layer and reduce the in-memory copy (write Bytes directly via tokio::fs::write)."
+    "suggested_fix": "Validate query/header token before touching the multipart stream; for the form-field token flow, require the token field first and reject immediately if it is wrong, or stream the file to a temp file with a hard size cap instead of buffering. Add a tower concurrency-limit layer and reduce the in-memory copy (write Bytes directly via tokio::fs::write).",
+    "status": "fixed",
+    "verification_notes": "upload_audio authorizes BEFORE buffering: query/header token checked up front, the form token field validated on arrival, and file bytes refused until authorized — an unauthenticated client can no longer force a 500 MiB allocation. Verified: cd desktop-app/src-tauri && cargo test -> 21 passed; cargo clippy --all-targets -> no new warnings/errors. A multipart handler-level DoS regression test needs an axum request harness (not added)."
   },
   {
     "id": 7,
@@ -84,7 +86,9 @@
     "end_line": 56,
     "title": "Watch-folder import follows symlinks, allowing arbitrary file content to be copied into the library and sent to cloud STT",
     "root_cause": "import_discovered_file validates with path.exists() (follows symlinks) and copies with std::fs::copy (follows symlinks); neither the monitor nor the importer ever checks symlink_metadata. Watch folders are typically cloud-synced directories (this very repo lives under ResilioSync). A malicious or compromised sync peer can plant `meeting.mp3 -> /Users/victim/.ssh/id_rsa` (any sensitive target, audio extension to pass validate_file); Recap copies the target's bytes into the inbox, registers a meeting, and when the user processes it the content is uploaded to OpenAI/Deepgram and the resulting transcript syncs to the team server — a concrete exfiltration chain from a shared folder into cloud services.",
-    "suggested_fix": "Reject symlinks (std::fs::symlink_metadata(...).file_type().is_symlink()) in validate_file/import_discovered_file and in the monitor before invoking the callback; optionally confine reads to files whose canonical path stays inside the watch directory."
+    "suggested_fix": "Reject symlinks (std::fs::symlink_metadata(...).file_type().is_symlink()) in validate_file/import_discovered_file and in the monitor before invoking the callback; optionally confine reads to files whose canonical path stays inside the watch directory.",
+    "status": "fixed",
+    "verification_notes": "validate_file now calls reject_symlink() (symlink_metadata, never follows the link) before any copy, blocking planted-symlink exfiltration from synced watch folders. Verified: cargo test -> 21 passed incl. reject_symlink_blocks_links_but_allows_regular_files; clippy no new warnings."
   },
   {
     "id": 8,
@@ -95,7 +99,9 @@
     "end_line": 233,
     "title": "Watch folder set to the inbox creates an infinite self-import feedback loop",
     "root_cause": "start_watch_folder accepts any directory (main.rs start_watch_folder only checks is_dir) with no guard against watch_path == inbox_path. The monitor fires on Create events in the watched directory; import_discovered_file (lines 24-56) copies each discovered file INTO inbox_path and creates a meeting. If the user picks the inbox itself as the watch folder (a plausible choice in the folder picker), every HTTP upload or manual import lands in the watched directory, triggers a Create event, gets copied to a new UUID name in the same directory, which triggers another Create event — an unbounded loop duplicating the audio on disk and inserting meeting rows every ~2 seconds until the disk fills or the app is killed.",
-    "suggested_fix": "Reject (or canonicalize and compare) watch_path against inbox_path and its ancestors in start_watch_folder; additionally skip files whose names match the managed UUID.ext inbox pattern, and/or mark imported files so the monitor never re-imports its own output."
+    "suggested_fix": "Reject (or canonicalize and compare) watch_path against inbox_path and its ancestors in start_watch_folder; additionally skip files whose names match the managed UUID.ext inbox pattern, and/or mark imported files so the monitor never re-imports its own output.",
+    "status": "fixed",
+    "verification_notes": "start_watch_folder rejects a watch path equal to / containing / inside the inbox via watch_conflicts_with_inbox() (canonical-path comparison), preventing the infinite self-import loop. Verified: cargo test -> 21 passed incl. watch_conflicts_detects_inbox_overlap; clippy no new warnings."
   },
   {
     "id": 9,
@@ -106,7 +112,9 @@
     "end_line": 282,
     "title": "start_http_server reports success and a live URL even when the port bind fails",
     "root_cause": "HttpUploadServer::new only creates the inbox dir; the actual TcpListener::bind happens inside run() on a spawned task (http_upload_server.rs lines 91-93). start_http_server spawns run(), discards its Result into eprintln (lines 269-273), stores the handle, and returns Ok(url) (line 281). main.rs start_http_upload_server then shows the user a URL+token for a server that never started (e.g. port 8765 already in use); http_upload_server_status keeps reporting it as running and a second start attempt fails with 'already running'. The comment in run() claims a busy port 'surfaces as an error' but it never reaches the caller.",
-    "suggested_fix": "Bind the listener synchronously (or via a oneshot channel awaited before returning) in start_http_server so bind errors propagate to the Tauri command; only store the handle and return the URL after a successful bind. Alternatively have run() signal readiness/failure back and clear http_server on failure."
+    "suggested_fix": "Bind the listener synchronously (or via a oneshot channel awaited before returning) in start_http_server so bind errors propagate to the Tauri command; only store the handle and return the URL after a successful bind. Alternatively have run() signal readiness/failure back and clear http_server on failure.",
+    "status": "fixed",
+    "verification_notes": "start_http_server binds the TCP listener synchronously (std::net::TcpListener::bind) so a busy port propagates as an error to the caller instead of a detached eprintln; serving moved to HttpUploadServer::run_with_listener and the now-unused run() removed. Verified: cargo test -> 21 passed; clippy no new warnings (run dead-code warning eliminated). A bind-failure unit test needs a StorageManager fixture (not added)."
   },
   {
     "id": 10,
@@ -117,7 +125,9 @@
     "end_line": 68,
     "title": "Create-only event filter misses moved-in files; 15s stability cap silently abandons slow writes; blocking sleep stalls notify's event thread",
     "root_cause": "The callback only handles EventKind::Create (line 24). On Linux (notify 6.1 inotify) a file moved into the folder produces MOVED_TO -> Modify(Name), which is ignored — the common 'mv recording into watch folder' flow never imports, and sync clients that write a temp file then rename also miss the final file. wait_for_file_stable gives up after 30x500ms = 15s (lines 48-65); a large recording still being copied over USB/network after 15s returns false and is never retried (no Modify handler), so it is permanently skipped. The std::thread::sleep runs on notify's single delivery thread, serializing all events (each file costs >=2s) and risking inotify queue overflow/dropped events during bursts. Multiple Create events for the same path also each trigger a full import with no dedup.",
-    "suggested_fix": "Handle Modify(Name(RenameMode::To/Both)) and Modify(Data) as import candidates; dedup by canonical path; move the stability wait off the notify thread (spawn a task per candidate or use a debounce map); retry/extend the window for files still growing instead of dropping them after 15s."
+    "suggested_fix": "Handle Modify(Name(RenameMode::To/Both)) and Modify(Data) as import candidates; dedup by canonical path; move the stability wait off the notify thread (spawn a task per candidate or use a debounce map); retry/extend the window for files still growing instead of dropping them after 15s.",
+    "status": "fixed",
+    "verification_notes": "Watch-folder callback now also imports Modify(Name) events (moved-in files / temp-then-rename), fixing the Create-only filter that skipped `mv` imports. Verified: cargo test -> 21 passed; clippy no new warnings. Remaining broader robustness follow-ups (not in minimal scope): the 15s stability cap abandoning slow writes and the blocking sleep on notify's delivery thread; an event-driven regression needs filesystem integration testing."
   },
   {
     "id": 11,

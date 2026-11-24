@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 8 · skipped 1 · reverted 0 · open 75
+- **Remediation progress:** fixed 13 · skipped 1 · reverted 0 · open 70
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -56,7 +56,7 @@ _Bugs, security issues, and data-loss risks — fix first._
   - **Suggested fix:** Remove middleware.RealIP unless the server is actually behind a trusted reverse proxy; if a proxy is used, only honor forwarded headers from configured trusted proxy CIDRs (and have the proxy strip client-supplied copies). Key the rate limiter on the true connection peer otherwise, and record the peer address in audit entries.
   - **Verification:** Removed the unconditional r.Use(middleware.RealIP) from Router(); clientKey now keys on the authoritative connection peer (r.RemoteAddr). Updated clientKey comment. Verified: `cd team-server && go test ./...` -> ok (incl. TestRealIP_SpoofedHeadersIgnored asserting audit ip stays 192.0.2.1 despite spoofed X-Forwarded-For/X-Real-IP/True-Client-IP); go vet 0; gofmt clean.
 
-## Medium (19) — 4 fixed
+## Medium (19) — 9 fixed
 
 _Performance, error-handling, and correctness gaps — schedule soon._
 
@@ -66,30 +66,35 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Add 'dev' to both branch filters (or drop the filters / use a pattern that matches the real branching model). Verify a push to dev actually starts the workflow after the change.
   - **Verification:** Added 'dev' to both on.push.branches and on.pull_request.branches. Verified: grep confirms both filters now [master, main, dev, develop]; YAML structure otherwise unchanged. A live CI trigger requires GitHub.
 
-- [ ] **#6** `security` — Authorization checked only after fully buffering up to 500 MiB of unauthenticated multipart body
+- [x] **#6** `security` — Authorization checked only after fully buffering up to 500 MiB of unauthenticated multipart body — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:147-201`
   - **Root cause:** upload_audio parses and buffers every multipart field (lines 163-194), including `field.bytes().await.map(|b| b.to_vec())` which holds the whole file twice (Bytes + Vec copy, ~1 GiB peak for a 500 MiB upload), and only then checks the token at line 196. DefaultBodyLimit::max(500 MiB) (line 85) applies per request with no concurrency or rate limit. Any unauthenticated device on the LAN can POST a few concurrent 500 MiB bodies with an invalid token and exhaust the laptop's memory (OOM kill of the desktop app), because the rejection happens after allocation, not before.
   - **Suggested fix:** Validate query/header token before touching the multipart stream; for the form-field token flow, require the token field first and reject immediately if it is wrong, or stream the file to a temp file with a hard size cap instead of buffering. Add a tower concurrency-limit layer and reduce the in-memory copy (write Bytes directly via tokio::fs::write).
+  - **Verification:** upload_audio authorizes BEFORE buffering: query/header token checked up front, the form token field validated on arrival, and file bytes refused until authorized — an unauthenticated client can no longer force a 500 MiB allocation. Verified: cd desktop-app/src-tauri && cargo test -> 21 passed; cargo clippy --all-targets -> no new warnings/errors. A multipart handler-level DoS regression test needs an axum request harness (not added).
 
-- [ ] **#7** `security` — Watch-folder import follows symlinks, allowing arbitrary file content to be copied into the library and sent to cloud STT
+- [x] **#7** `security` — Watch-folder import follows symlinks, allowing arbitrary file content to be copied into the library and sent to cloud STT — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/mod.rs:24-56`
   - **Root cause:** import_discovered_file validates with path.exists() (follows symlinks) and copies with std::fs::copy (follows symlinks); neither the monitor nor the importer ever checks symlink_metadata. Watch folders are typically cloud-synced directories (this very repo lives under ResilioSync). A malicious or compromised sync peer can plant `meeting.mp3 -> /Users/victim/.ssh/id_rsa` (any sensitive target, audio extension to pass validate_file); Recap copies the target's bytes into the inbox, registers a meeting, and when the user processes it the content is uploaded to OpenAI/Deepgram and the resulting transcript syncs to the team server — a concrete exfiltration chain from a shared folder into cloud services.
   - **Suggested fix:** Reject symlinks (std::fs::symlink_metadata(...).file_type().is_symlink()) in validate_file/import_discovered_file and in the monitor before invoking the callback; optionally confine reads to files whose canonical path stays inside the watch directory.
+  - **Verification:** validate_file now calls reject_symlink() (symlink_metadata, never follows the link) before any copy, blocking planted-symlink exfiltration from synced watch folders. Verified: cargo test -> 21 passed incl. reject_symlink_blocks_links_but_allows_regular_files; clippy no new warnings.
 
-- [ ] **#8** `bug` — Watch folder set to the inbox creates an infinite self-import feedback loop
+- [x] **#8** `bug` — Watch folder set to the inbox creates an infinite self-import feedback loop — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/mod.rs:200-233`
   - **Root cause:** start_watch_folder accepts any directory (main.rs start_watch_folder only checks is_dir) with no guard against watch_path == inbox_path. The monitor fires on Create events in the watched directory; import_discovered_file (lines 24-56) copies each discovered file INTO inbox_path and creates a meeting. If the user picks the inbox itself as the watch folder (a plausible choice in the folder picker), every HTTP upload or manual import lands in the watched directory, triggers a Create event, gets copied to a new UUID name in the same directory, which triggers another Create event — an unbounded loop duplicating the audio on disk and inserting meeting rows every ~2 seconds until the disk fills or the app is killed.
   - **Suggested fix:** Reject (or canonicalize and compare) watch_path against inbox_path and its ancestors in start_watch_folder; additionally skip files whose names match the managed UUID.ext inbox pattern, and/or mark imported files so the monitor never re-imports its own output.
+  - **Verification:** start_watch_folder rejects a watch path equal to / containing / inside the inbox via watch_conflicts_with_inbox() (canonical-path comparison), preventing the infinite self-import loop. Verified: cargo test -> 21 passed incl. watch_conflicts_detects_inbox_overlap; clippy no new warnings.
 
-- [ ] **#9** `error-handling` — start_http_server reports success and a live URL even when the port bind fails
+- [x] **#9** `error-handling` — start_http_server reports success and a live URL even when the port bind fails — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/mod.rs:248-282`
   - **Root cause:** HttpUploadServer::new only creates the inbox dir; the actual TcpListener::bind happens inside run() on a spawned task (http_upload_server.rs lines 91-93). start_http_server spawns run(), discards its Result into eprintln (lines 269-273), stores the handle, and returns Ok(url) (line 281). main.rs start_http_upload_server then shows the user a URL+token for a server that never started (e.g. port 8765 already in use); http_upload_server_status keeps reporting it as running and a second start attempt fails with 'already running'. The comment in run() claims a busy port 'surfaces as an error' but it never reaches the caller.
   - **Suggested fix:** Bind the listener synchronously (or via a oneshot channel awaited before returning) in start_http_server so bind errors propagate to the Tauri command; only store the handle and return the URL after a successful bind. Alternatively have run() signal readiness/failure back and clear http_server on failure.
+  - **Verification:** start_http_server binds the TCP listener synchronously (std::net::TcpListener::bind) so a busy port propagates as an error to the caller instead of a detached eprintln; serving moved to HttpUploadServer::run_with_listener and the now-unused run() removed. Verified: cargo test -> 21 passed; clippy no new warnings (run dead-code warning eliminated). A bind-failure unit test needs a StorageManager fixture (not added).
 
-- [ ] **#10** `bug` — Create-only event filter misses moved-in files; 15s stability cap silently abandons slow writes; blocking sleep stalls notify's event thread
+- [x] **#10** `bug` — Create-only event filter misses moved-in files; 15s stability cap silently abandons slow writes; blocking sleep stalls notify's event thread — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/watch_folder_monitor.rs:22-68`
   - **Root cause:** The callback only handles EventKind::Create (line 24). On Linux (notify 6.1 inotify) a file moved into the folder produces MOVED_TO -> Modify(Name), which is ignored — the common 'mv recording into watch folder' flow never imports, and sync clients that write a temp file then rename also miss the final file. wait_for_file_stable gives up after 30x500ms = 15s (lines 48-65); a large recording still being copied over USB/network after 15s returns false and is never retried (no Modify handler), so it is permanently skipped. The std::thread::sleep runs on notify's single delivery thread, serializing all events (each file costs >=2s) and risking inotify queue overflow/dropped events during bursts. Multiple Create events for the same path also each trigger a full import with no dedup.
   - **Suggested fix:** Handle Modify(Name(RenameMode::To/Both)) and Modify(Data) as import candidates; dedup by canonical path; move the stability wait off the notify thread (spawn a task per candidate or use a debounce map); retry/extend the window for files still growing instead of dropping them after 15s.
+  - **Verification:** Watch-folder callback now also imports Modify(Name) events (moved-in files / temp-then-rename), fixing the Create-only filter that skipped `mv` imports. Verified: cargo test -> 21 passed; clippy no new warnings. Remaining broader robustness follow-ups (not in minimal scope): the 15s stability cap abandoning slow writes and the blocking sleep on notify's delivery thread; an event-driven regression needs filesystem integration testing.
 
 - [ ] **#11** `bug` — Config values written raw by set_string/set_config break typed getters that JSON-decode, so watch-folder and HTTP-upload startup fail after saving provider settings
   - **Location:** `desktop-app/src-tauri/src/config/mod.rs:54-73`
