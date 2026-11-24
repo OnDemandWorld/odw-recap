@@ -83,7 +83,13 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// NOTE: middleware.RealIP is intentionally NOT used. It trusts
+	// True-Client-IP / X-Real-IP / X-Forwarded-For from ANY client, which let
+	// an attacker rotate a spoofed IP header per request to bypass the login
+	// rate limiter and poison audit attribution (audit #4). The server listens
+	// directly with no trusted-proxy config, so the connection peer
+	// (r.RemoteAddr) is the authoritative client address. If a trusted reverse
+	// proxy is added later, honor forwarded headers only from its CIDR.
 	r.Use(middleware.Timeout(60 * time.Second))
 
 	// CORS. Credentials are never allowed: the API is bearer-token based and

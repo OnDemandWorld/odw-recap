@@ -31,6 +31,7 @@ pub struct Meeting {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MeetingStatus {
     Recording,
     Processing,
@@ -67,6 +68,7 @@ impl From<String> for MeetingStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SyncStatus {
     NotSynced,
     Syncing,
@@ -100,6 +102,7 @@ impl From<String> for SyncStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AudioSource {
     SystemCapture,
     FileImport,
@@ -189,4 +192,49 @@ pub struct Decision {
     pub vault_entry_id: Option<String>,
     pub sync_status: SyncStatus,
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression for audit #3: get_meeting serializes Meeting via serde, and the
+    // frontend (utils.js isReady) requires lowercase "completed". The derived
+    // Serialize previously emitted PascalCase "Completed", so the detail view
+    // never recognized a finished meeting. The wire format must match the
+    // ToString / From<String> convention used for DB storage.
+    #[test]
+    fn meeting_status_serde_is_lowercase() {
+        assert_eq!(serde_json::to_string(&MeetingStatus::Completed).unwrap(), "\"completed\"");
+        assert_eq!(serde_json::to_string(&MeetingStatus::Processing).unwrap(), "\"processing\"");
+        assert_eq!(serde_json::to_string(&MeetingStatus::Recording).unwrap(), "\"recording\"");
+        // Round-trips back to the same variant.
+        let parsed: MeetingStatus = serde_json::from_str("\"completed\"").unwrap();
+        assert!(matches!(parsed, MeetingStatus::Completed));
+    }
+
+    #[test]
+    fn status_enums_serde_matches_to_string() {
+        // serde wire format must equal the snake_case ToString convention for
+        // every variant (multi-word variants included).
+        for s in [
+            SyncStatus::NotSynced,
+            SyncStatus::Syncing,
+            SyncStatus::Synced,
+            SyncStatus::Failed,
+            SyncStatus::PermanentlyFailed,
+        ] {
+            let wire = serde_json::to_string(&s).unwrap();
+            assert_eq!(wire, format!("\"{}\"", s.to_string()));
+        }
+        for a in [
+            AudioSource::SystemCapture,
+            AudioSource::FileImport,
+            AudioSource::MobileUpload,
+            AudioSource::WatchFolder,
+        ] {
+            let wire = serde_json::to_string(&a).unwrap();
+            assert_eq!(wire, format!("\"{}\"", a.to_string()));
+        }
+    }
 }

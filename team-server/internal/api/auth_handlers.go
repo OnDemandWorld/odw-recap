@@ -216,9 +216,10 @@ func parseJSON(w http.ResponseWriter, r *http.Request, v interface{}) error {
 	return dec.Decode(v)
 }
 
-// clientKey identifies the rate-limit subject for a request: the real client
-// IP when behind a trusted proxy (X-Forwarded-For set by middleware.RealIP)
-// or the connection peer otherwise.
+// clientKey identifies the rate-limit subject for a request: the connection
+// peer (r.RemoteAddr). Forwarded headers are deliberately not trusted here —
+// middleware.RealIP is not installed (see Router), so a client cannot spoof
+// its way into a fresh rate-limit bucket (audit #4).
 func clientKey(r *http.Request) string {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host

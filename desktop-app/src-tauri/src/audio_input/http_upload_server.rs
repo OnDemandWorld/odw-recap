@@ -270,7 +270,33 @@ async fn upload_page(
     Query(query): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let token = query.get("token").cloned().unwrap_or_default();
-    Html(format!(
+    Html(upload_page_html(&token))
+}
+
+/// Escape the five HTML-significant characters so attacker-controlled text
+/// (the `token` query parameter is reflected into an attribute) cannot break
+/// out of its context. Audit #1: the raw token was previously interpolated
+/// unescaped, giving unauthenticated reflected XSS on the LAN-bound service.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Pure renderer for the upload page, separated from the axum handler so the
+/// escaping can be unit-tested. The token is HTML-escaped before interpolation.
+fn upload_page_html(token: &str) -> String {
+    let token = html_escape(token);
+    format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ODW Recap — Upload recording</title>
@@ -283,5 +309,27 @@ button{{width:100%;padding:.9rem;font-size:1rem;margin-top:1rem}}</style></head>
 <input type="file" name="file" accept=".m4a,.wav,.mp3,.ogg,.webm,.flac" required style="width:100%;padding:.6rem">
 <button type="submit">Upload</button>
 </form></body></html>"#
-    ))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression for audit #1: a malicious token must not be able to inject
+    // markup/script into the reflected upload page.
+    #[test]
+    fn upload_page_escapes_hostile_token() {
+        let evil = "\"><script>alert(1)</script>";
+        let html = upload_page_html(evil);
+        assert!(!html.contains("<script>alert(1)</script>"), "raw script leaked: {}", html);
+        assert!(!html.contains("\"><script>"), "attribute breakout leaked");
+        assert!(html.contains("&quot;&gt;&lt;script&gt;"), "token not escaped: {}", html);
+    }
+
+    #[test]
+    fn html_escape_covers_all_special_chars() {
+        assert_eq!(html_escape("&<>\"'"), "&amp;&lt;&gt;&quot;&#x27;");
+        assert_eq!(html_escape("plain-token-123"), "plain-token-123");
+    }
 }

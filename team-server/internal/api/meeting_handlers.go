@@ -93,9 +93,37 @@ func (s *Server) createMeetingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Audit #2: the desktop sync client POSTs its own meeting UUID as `id`
+	// expecting upsert semantics (it treats 201 or 409 as success, then sends
+	// /sync referencing that id). Previously req.ID was discarded and a fresh
+	// uuid.New() minted on every call, so each sync created a duplicate empty
+	// meeting and /sync referenced a nonexistent row. Honor a client-supplied
+	// id: create it when new, return 409 when the caller already owns it, and
+	// 403 when it belongs to another tenant (never overwrite another's row).
+	meetingID := uuid.New()
+	if req.ID != uuid.Nil {
+		existing, err := s.meetings.Get(r.Context(), req.ID)
+		switch {
+		case err == nil:
+			if !s.canAccess(user, existing) {
+				respondError(w, http.StatusForbidden, "You do not have access to this meeting")
+				return
+			}
+			// Already exists and is accessible: idempotent upsert no-op. The
+			// desktop client accepts 409 and proceeds to /sync against this id.
+			respondJSON(w, http.StatusConflict, map[string]interface{}{"id": existing.ID, "status": existing.Status})
+			return
+		case errors.Is(err, ErrMeetingNotFound):
+			meetingID = req.ID
+		default:
+			respondError(w, http.StatusInternalServerError, "Failed to create meeting")
+			return
+		}
+	}
+
 	now := time.Now()
 	meeting := &models.Meeting{
-		ID:          uuid.New(),
+		ID:          meetingID,
 		CreatedBy:   &user.ID,
 		Title:       req.Title,
 		MeetingType: req.MeetingType,
