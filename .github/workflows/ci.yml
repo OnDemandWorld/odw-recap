@@ -35,7 +35,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
+        go-version: '1.23'
     - name: Run Go tests
       run: |
         cd team-server
@@ -60,7 +60,11 @@ jobs:
     - name: Install dependencies
       run: |
         cd desktop-app
-        npm install
+        npm ci
+    - name: Run frontend tests
+      run: |
+        cd desktop-app
+        npm test
     - name: Build Tauri app
       run: |
         cd desktop-app
@@ -75,7 +79,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
+        go-version: '1.23'
     - name: Build team server
       run: |
         cd team-server

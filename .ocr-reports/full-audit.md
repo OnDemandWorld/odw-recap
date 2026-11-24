@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 31 · skipped 2 · reverted 0 · open 51
+- **Remediation progress:** fixed 37 · skipped 4 · reverted 0 · open 43
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 10 fixed
+## Low (61) — 16 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -183,20 +183,23 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** actions/checkout@v4, actions/setup-go@v5, actions/setup-node@v4 and Swatinem/rust-cache@v2 are mutable major-version tags, and dtolnay/rust-toolchain@stable is a moving branch. Anyone who compromises the action repo (or a maintainer tag force-push) can change the code that runs in this workflow with the GITHUB_TOKEN and write access to the checkout, without any diff appearing in this repository. No github.event context is interpolated into run: blocks and no secrets are used, so there is no injection/exposure issue today — this is purely supply-chain hardening.
   - **Suggested fix:** Pin every action to a full commit SHA with a trailing version comment (e.g. actions/checkout@<sha> # v4.x.x) and let Dependabot/Renovate propose SHA bumps. For dtolnay/rust-toolchain, pin a SHA and pass toolchain: stable as an input instead of using the @stable branch.
 
-- [ ] **#25** `maintainability` — Go toolchain drift: CI tests on Go 1.21 while the release Docker image builds with Go 1.23
+- [x] **#25** `maintainability` — Go toolchain drift: CI tests on Go 1.21 while the release Docker image builds with Go 1.23 — **FIXED**
   - **Location:** `.github/workflows/ci.yml:36-38`
   - **Root cause:** go-tests and build-team-server use actions/setup-go with go-version '1.21' (lines 38, 78), matching go.mod's 'go 1.21' directive, but team-server/Dockerfile:3 builds the shipped binary with golang:1.23-alpine. The toolchain that actually produces the distributed artifact is never exercised by CI tests (and stdlib behavior differences between 1.21 and 1.23 go untested), so a 1.23-only regression could pass CI and ship.
   - **Suggested fix:** Align the versions: either bump CI go-version to '1.23' (and the go.mod directive if appropriate) or build the Docker image with golang:1.21-alpine. Ideally derive both from a single source (e.g. go-version-file: team-server/go.mod).
+  - **Verification:** CI go-version bumped 1.21 -> 1.23 in both go-tests and build-team-server to match the golang:1.23-alpine Docker release toolchain (the artifact-producing toolchain is now exercised by CI). Verified: grep ci.yml shows go-version '1.23' x2; YAML structure intact.
 
-- [ ] **#26** `bug` — Frontend Jest suite (utils + command-contract tests) is never executed in CI
+- [x] **#26** `bug` — Frontend Jest suite (utils + command-contract tests) is never executed in CI — **FIXED**
   - **Location:** `.github/workflows/ci.yml:44-67`
   - **Root cause:** No job in ci.yml runs 'npm test' / jest (grep for npm test|jest across .github/workflows returns nothing). build-desktop runs npm install and 'npm run tauri build' only. The command-contract test (tests/commands.test.js) exists specifically to catch frontend/backend invoke drift before packaging, and utils.test.js guards the escaping helpers, but neither runs on any push or PR — they only run if a developer remembers scripts/test-all.sh locally.
   - **Suggested fix:** Add a frontend-tests job (or a step in build-desktop before the build): actions/setup-node, 'npm ci', 'npm test' in desktop-app. Make it a 'needs' dependency of build-desktop so contract failures block packaging.
+  - **Verification:** build-desktop now runs 'npm test' (Jest utils + command-contract) after install and before the Tauri build, so frontend/backend contract regressions block packaging. Verified: grep ci.yml shows the npm test step; npm test locally -> 25 passed.
 
-- [ ] **#27** `maintainability` — CI uses 'npm install' instead of 'npm ci' despite a committed lockfile
+- [x] **#27** `maintainability` — CI uses 'npm install' instead of 'npm ci' despite a committed lockfile — **FIXED**
   - **Location:** `.github/workflows/ci.yml:60-63`
   - **Root cause:** desktop-app/package-lock.json exists, but the build-desktop job runs 'npm install' (line 63), which can resolve differently from the lockfile, silently update it in the runner, and install a different dependency tree than local development — non-reproducible builds and a wider supply-chain surface (scripts of freshly resolved packages run at install time).
   - **Suggested fix:** Replace 'npm install' with 'npm ci' in CI (and in scripts/build-all.sh / package.sh for reproducibility). npm ci fails fast if the lockfile is out of sync with package.json instead of silently rewriting it.
+  - **Verification:** CI build-desktop and scripts/build-all.sh + scripts/package.sh now use 'npm ci' (reproducible from the committed lockfile, fails fast on drift) instead of 'npm install'. Verified: grep ci.yml npm ci; bash -n on all three scripts OK.
 
 - [ ] **#28** `maintainability` — @tauri-apps/api is a declared runtime dependency but is never used
   - **Location:** `desktop-app/package.json:17-19`
@@ -408,20 +411,23 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** tauri.conf.json:38 sets style-src 'self' with no 'unsafe-inline'. Tauri v1 only appends nonces/hashes for its own injected scripts/styles (verified in tauri-1.8.3 src/manager.rs replace_csp_nonce); it does not relax the policy for app markup. CSP style-src without 'unsafe-inline' blocks style="" attributes, so the search input's inline layout (index.html:41: flex:1;max-width:320px;padding;border;border-radius) and the search-result cards' style="cursor:pointer" (main.js:82) are silently dropped in the packaged app: the search box loses its intended sizing and hit cards give no pointer affordance. Note tests/commands.test.js:101 explicitly forbids adding 'unsafe-inline' to the CSP, so the markup is what must change.
   - **Suggested fix:** Move both inline styles into styles.css classes (e.g. .transcript-search { flex:1; max-width:320px; ... } and .meeting-card { cursor:pointer }) and reference the classes from index.html and the main.js search-result template. Keep the CSP unchanged.
 
-- [ ] **#70** `bug` — build-all.sh hardcodes ~/.cargo/bin/cargo, assumes repo-root CWD, and lacks set -u / pipefail
+- [x] **#70** `bug` — build-all.sh hardcodes ~/.cargo/bin/cargo, assumes repo-root CWD, and lacks set -u / pipefail — **FIXED**
   - **Location:** `scripts/build-all.sh:2-9`
   - **Root cause:** Line 9 invokes '~/.cargo/bin/cargo' literally: on machines where cargo comes from a system package (/usr/bin/cargo), a custom CARGO_HOME, or a rustup install under a different user, the script dies with 'No such file or directory' even though cargo is on PATH. All cd targets (lines 8, 14, 21) are relative, so running the script from anywhere other than the repo root (e.g. 'cd scripts && ./build-all.sh') fails at the first cd. Only 'set -e' is set — unset variables and failing commands inside pipelines are not caught.
   - **Suggested fix:** Use 'set -euo pipefail', anchor the script with 'cd "$(dirname "$0")/.."' at the top, and call plain 'cargo' (relying on PATH) instead of ~/.cargo/bin/cargo.
+  - **Verification:** build-all.sh: set -euo pipefail, anchor to repo root via cd "$(dirname "$0")/..", and cargo resolved from PATH (no hardcoded ~/.cargo/bin/cargo). Verified: bash -n scripts/build-all.sh -> syntax OK.
 
-- [ ] **#71** `performance` — Redundant full Rust release build: cargo build --release immediately followed by tauri build
+- [x] **#71** `performance` — Redundant full Rust release build: cargo build --release immediately followed by tauri build — **FIXED**
   - **Location:** `scripts/build-all.sh:8-16`
   - **Root cause:** Line 9 runs '~/.cargo/bin/cargo build --release' (no features), then line 16 runs 'npm run tauri build'. The Tauri v1 CLI itself invokes cargo build with '--features custom-protocol' (the feature declared in Cargo.toml:52-55), which changes the feature set and forces a recompile of the crate graph. The first full release compilation is therefore wasted work that roughly doubles Rust build time on every invocation.
   - **Suggested fix:** Delete the standalone 'cargo build --release' step (lines 6-10) and let 'npm run tauri build' perform the single release build. If a backend-only compile check is wanted, use 'cargo check' instead.
+  - **Verification:** Removed the redundant standalone 'cargo build --release' that ran before 'npm run tauri build' (the Tauri CLI performs the single release build with --features custom-protocol, so the prior step just recompiled the crate graph twice). Verified: bash -n OK; script no longer contains a standalone cargo build.
 
-- [ ] **#72** `bug` — test-all.sh hardcodes ~/.cargo/bin/cargo, assumes repo-root CWD, and runs npm test without installing dependencies
+- [x] **#72** `bug` — test-all.sh hardcodes ~/.cargo/bin/cargo, assumes repo-root CWD, and runs npm test without installing dependencies — **FIXED**
   - **Location:** `scripts/test-all.sh:2-21`
   - **Root cause:** Same robustness gaps as build-all.sh: '~/.cargo/bin/cargo' (line 9) fails when cargo is installed elsewhere; relative cd calls (lines 8, 14, 20) require CWD=repo root; only 'set -e' is set. Additionally line 21 runs 'npm test' (jest) without any prior 'npm install'/'npm ci' in desktop-app — on a fresh clone jest is not installed and the frontend test leg fails with 'jest: not found' unless the developer happened to run build-all.sh first.
   - **Suggested fix:** Use 'set -euo pipefail', 'cd "$(dirname "$0")/.."', plain 'cargo' from PATH, and run 'npm ci' in desktop-app before 'npm test'.
+  - **Verification:** test-all.sh: set -euo pipefail, repo-root anchoring, cargo from PATH, and 'npm ci' before 'npm test' so a fresh clone has jest installed. Verified: bash -n scripts/test-all.sh -> syntax OK.
 
 - [x] **#73** `performance` — Admin and auth DB calls ignore the request context, so timeouts and client disconnects do not cancel queries — **FIXED**
   - **Location:** `team-server/internal/api/admin_handlers.go:38-41`
@@ -465,10 +471,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Return a generic client-facing message (e.g. 'Sync queued for retry') and keep detailed errors in server logs and sync_queue.last_error only.
   - **Verification:** Partial-sync response Message is now a generic 'Sync completed with errors; queued for retry'; the joined error (internal Vault/Loop URLs + upstream bodies) stays in the log and sync_queue.last_error only. Removed the now-unused fmt import. Verified: go test ./... ok; go vet 0; gofmt clean.
 
-- [ ] **#80** `security` — Authorization relies solely on 24h JWT claims with no revocation or DB revalidation
+- [ ] **#80** `security` — Authorization relies solely on 24h JWT claims with no revocation or DB revalidation — **SKIPPED**
   - **Location:** `team-server/internal/auth/middleware.go:46-51`
   - **Root cause:** Middleware builds the request user (ID/email/role) entirely from token claims; no handler re-checks the users table. A stolen token, or a user deleted/demoted directly in the database (the only way today, since no role-management endpoint exists), retains full access — including admin cross-tenant access via canAccess — until the 24-hour expiry (jwt.go:36). There is no logout/revocation mechanism.
   - **Suggested fix:** For sensitive deployments, revalidate role/existence against the DB (or a Redis denylist) on admin routes, shorten token lifetime with refresh tokens, and add a revocation path when user management endpoints are introduced.
+  - **Verification:** Skipped (security feature beyond minimal scope): revocation requires refresh tokens + a denylist or per-request DB role/existence revalidation, and a logout/role-management path. Shortening the 24h JWT lifetime alone would break UX without refresh tokens. Recommended follow-up: add refresh tokens + a Redis denylist and revalidate role on admin routes.
 
 - [x] **#81** `performance` — No connection-pool tuning on sql.DB (unbounded open connections, default idle pool of 2) — **FIXED**
   - **Location:** `team-server/internal/db/database.go:40-57`
@@ -476,10 +483,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Set sensible pool bounds (e.g. MaxOpenConns ~25-50 aligned with Postgres max_connections, MaxIdleConns matching, ConnMaxLifetime ~5-15m) and make them configurable.
   - **Verification:** NewDatabase sets SetMaxOpenConns(25), SetMaxIdleConns(25), SetConnMaxLifetime(5m) to bound the pool (avoid exhausting Postgres max_connections and idle-connect churn). Verified: go test ./... ok (db package); go vet 0; gofmt clean.
 
-- [ ] **#82** `maintainability` — Redis is wired but never used; rate limiting is per-process and ParseURL failures are silently ignored
+- [ ] **#82** `maintainability` — Redis is wired but never used; rate limiting is per-process and ParseURL failures are silently ignored — **SKIPPED**
   - **Location:** `team-server/internal/db/redis.go:18-29`
   - **Root cause:** main.go:120-121 creates a Redis client and Server stores it (server.go:39), but no code path ever calls Set/Get/Delete — the login limiter is in-memory only. In a multi-replica deployment each replica grants its own 10 attempts/minute budget (N replicas = N x budget), and the 'Redis' component of the advertised stack provides no function. Additionally NewRedis silently falls back to treating a malformed redis:// URL as a bare host:port when redis.ParseURL errors (lines 21-23), hiding configuration mistakes.
   - **Suggested fix:** Either move the rate limiter to Redis (shared buckets across replicas) or remove the unused client; log/return an error when ParseURL fails instead of silently degrading.
+  - **Verification:** Skipped (architectural): a correct fix moves the login rate limiter to Redis (shared buckets across replicas) or removes the unused Redis client and reworks main.go wiring / the advertised stack; NewRedis silently falling back on a malformed URL is a minor part. Neither is a small strictly-scoped edit, and multi-replica behavior is not testable without live Redis. Recommended follow-up: Redis-backed limiter + log/return ParseURL errors instead of silent degradation.
 
 - [x] **#83** `error-handling` — Unbounded io.ReadAll of Vault/Loop response bodies — **FIXED**
   - **Location:** `team-server/internal/sync/forwarder.go:99-101`

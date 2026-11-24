@@ -17,7 +17,7 @@ echo "Packaging for $PLATFORM ($ARCH)..."
 # Package desktop app
 echo "Packaging desktop app..."
 cd "$ROOT/desktop-app"
-npm install
+npm ci
 npm run tauri build
 
 # Package team server
