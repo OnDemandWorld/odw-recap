@@ -184,6 +184,15 @@ impl SqliteManager {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
+        // Audit #50: FTS5 interprets its MATCH argument as a query language, so
+        // raw user text with quotes/parentheses/operators (e.g. 'budget "Q3"')
+        // is a syntax error. Treat each whitespace-separated token as a literal
+        // phrase by double-quoting it (internal quotes doubled).
+        let fts_query = query
+            .split_whitespace()
+            .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" ");
         let mut stmt = self.conn.prepare(
             "SELECT m.id, highlight(transcript_search, 0, '【', '】')
              FROM transcript_search
@@ -195,7 +204,7 @@ impl SqliteManager {
         )?;
 
         let limit_str = limit.to_string();
-        let results = stmt.query_map([query, &limit_str], |row| {
+        let results = stmt.query_map([&fts_query, &limit_str], |row| {
             let id_str: String = row.get(0)?;
             let id = Uuid::parse_str(&id_str).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -267,7 +276,27 @@ impl SqliteManager {
     }
 
     pub fn delete_meeting(&self, id: Uuid) -> Result<()> {
-        self.conn.execute("DELETE FROM meetings WHERE id = ?1", params![id.to_string()])?;
+        // Audit #51: transcript_search is an external-content FTS5 table; the
+        // FK cascade deletes transcript_segments but never purges the index,
+        // leaving orphaned entries. Retire them before deleting the meeting.
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("SELECT id, text FROM transcript_segments WHERE meeting_id = ?1")?;
+            let old_rows: Vec<(i64, String)> = stmt
+                .query_map(params![id.to_string()], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (rowid, text) in old_rows {
+                tx.execute(
+                    "INSERT INTO transcript_search(transcript_search, rowid, text) VALUES('delete', ?1, ?2)",
+                    params![rowid, text],
+                )?;
+            }
+        }
+        tx.execute("DELETE FROM meetings WHERE id = ?1", params![id.to_string()])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -302,13 +331,17 @@ impl SqliteManager {
                 let rows = stmt.query_map(params![meeting_id.to_string()], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })?;
-                rows.filter_map(|r| r.ok()).collect()
+                // Audit #52: propagate row-read errors (filter_map(|r| r.ok())
+                // silently skipped unreadable rows, leaving their FTS entries).
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
             for (rowid, text) in old_rows {
-                let _ = tx.execute(
+                // Audit #52: surface 'delete' command failures instead of let _ =
+                // which left the external-content index inconsistent.
+                tx.execute(
                     "INSERT INTO transcript_search(transcript_search, rowid, text) VALUES('delete', ?1, ?2)",
                     params![rowid, text],
-                );
+                )?;
             }
         }
         tx.execute("DELETE FROM transcript_segments WHERE meeting_id = ?1", params![meeting_id.to_string()])?;

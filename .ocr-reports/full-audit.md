@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 45 · skipped 5 · reverted 0 · open 34
+- **Remediation progress:** fixed 48 · skipped 5 · reverted 0 · open 31
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 24 fixed
+## Low (61) — 27 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -318,20 +318,23 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** On a corrupt salt file, rename it aside (salt.bin.corrupt), surface a recoverable startup error/dialog explaining that API keys must be re-saved, and recreate a fresh salt instead of panicking; write salt.bin atomically (temp file + rename) to prevent partial writes.
   - **Verification:** load_or_create_salt quarantines a corrupt salt.bin to salt.bin.corrupt and creates a fresh salt (warning that API keys must be re-saved) instead of returning Err that main() .expect()s into an invisible startup panic; salt writes are now atomic (temp file + rename). Verified: cargo test -> 30 passed incl. test_corrupt_salt_recovers; clippy no new warnings.
 
-- [ ] **#50** `bug` — Raw user search text is passed to FTS5 MATCH, so ordinary queries containing quotes/parentheses/operators fail with a database syntax error
+- [x] **#50** `bug` — Raw user search text is passed to FTS5 MATCH, so ordinary queries containing quotes/parentheses/operators fail with a database syntax error — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/sqlite_manager.rs:181-192`
   - **Root cause:** search_transcripts binds the user's query directly as the MATCH expression. Binding prevents SQL injection, but FTS5 interprets its argument as a query language: a transcript search like 'budget "Q3"' or 'call (John' or a lone 'NEAR' is a malformed FTS5 query and rusqlite returns an error that surfaces to the UI as 'Database error: fts5: syntax error'. Users typing natural text with punctuation get failures instead of results.
   - **Suggested fix:** Treat user input as literal text by wrapping each whitespace-separated token in double quotes with internal quotes doubled (e.g. format!("\"{}\"", token.replace('"', "\"\""))) before MATCH, or catch the syntax error and retry with the quoted form.
+  - **Verification:** search_transcripts wraps each whitespace-separated token as a double-quoted FTS5 phrase (internal quotes doubled), so user text with quotes/parentheses/operators no longer raises an FTS5 syntax error. Verified: cd desktop-app/src-tauri && cargo test -> 32 passed incl. test_search_with_punctuation_does_not_error; clippy no new warnings.
 
-- [ ] **#51** `bug` — delete_meeting cascades transcript_segments but never purges the external-content FTS index, leaving orphaned transcript_search entries forever
+- [x] **#51** `bug` — delete_meeting cascades transcript_segments but never purges the external-content FTS index, leaving orphaned transcript_search entries forever — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/sqlite_manager.rs:263-266`
   - **Root cause:** DELETE FROM meetings cascades to transcript_segments (FK ON DELETE CASCADE), but transcript_search is an external-content FTS5 table that is only maintained inside save_transcript_segments. Deleted meetings' index entries are never removed ('delete' commands are never issued for them), so the FTS index grows without bound and becomes inconsistent with its content table. Search results are masked by the inner JOIN, but rank computation and index size degrade over time and any future content-table read path (snippet/highlight variants) hits missing rows.
   - **Suggested fix:** Before deleting the meeting, issue FTS5 'delete' commands for its segments (same pattern as save_transcript_segments), or add an AFTER DELETE trigger on transcript_segments that inserts the 'delete' command into transcript_search.
+  - **Verification:** delete_meeting now retires the meeting's external-content FTS rows ('delete' commands) inside a transaction before the cascade delete, so orphaned transcript_search entries no longer accumulate. Verified: cargo test -> 32 passed incl. test_delete_meeting_purges_fts (search returns nothing after delete); clippy no new warnings.
 
-- [ ] **#52** `error-handling` — FTS index retirement silently skips unreadable rows and swallows 'delete' command errors, allowing silent index corruption
+- [x] **#52** `error-handling` — FTS index retirement silently skips unreadable rows and swallows 'delete' command errors, allowing silent index corruption — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/sqlite_manager.rs:285-292`
   - **Root cause:** In save_transcript_segments, old rows are collected with rows.filter_map(|r| r.ok()) (any row that fails to deserialize is skipped, so its FTS entry is never retired) and each INSERT INTO transcript_search(...,'delete',...) is executed with let _ =, discarding errors. If a delete fails (e.g. text mismatch after external tampering), the stale entry remains and the subsequent re-index can leave the external-content index inconsistent, with no log or error surfaced.
   - **Suggested fix:** Propagate row-read errors (collect::<Result<Vec<_>>>()) and at least log/propagate FTS delete failures; consider 'rebuild' as a recovery path when retirement fails.
+  - **Verification:** save_transcript_segments propagates row-read errors (collect::<Result<Vec,_>> instead of filter_map(|r| r.ok())) and FTS 'delete' command errors (? instead of let _ =), so index retirement failures surface instead of silently corrupting the external-content index. Verified: cargo test -> 32 passed; clippy no new warnings.
 
 - [ ] **#53** `bug` — From<String> for status enums silently maps unknown values to Deleted / PermanentlyFailed, misrepresenting corrupted or future-version rows — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/storage/types.rs:56-100`

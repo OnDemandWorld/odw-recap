@@ -296,4 +296,50 @@ mod tests {
         let new_salt = std::fs::read(&salt_path).unwrap();
         assert_eq!(new_salt.len(), 32, "fresh salt must be 32 bytes");
     }
+
+    fn segment(meeting_id: Uuid, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            id: 0,
+            meeting_id,
+            start_ms: 0,
+            end_ms: 1000,
+            text: text.to_string(),
+            speaker_id: None,
+            confidence: 0.9,
+            is_final: true,
+            version: 1,
+        }
+    }
+
+    // Audit #50: punctuation in a search query must not raise an FTS5 syntax error.
+    #[test]
+    fn test_search_with_punctuation_does_not_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "pass").unwrap();
+        let meeting = create_test_meeting();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+        storage.save_transcript_segments(id, &[segment(id, "budget Q3 review")]).unwrap();
+
+        for q in ["budget \"Q3\"", "call (John", "NEAR", "a & b | c"] {
+            assert!(storage.search_transcripts(q, 10).is_ok(), "query {:?} errored", q);
+        }
+        // A plain term still matches.
+        assert_eq!(storage.search_transcripts("budget", 10).unwrap().len(), 1);
+    }
+
+    // Audit #51: deleting a meeting purges its FTS index entries (no orphaned hits).
+    #[test]
+    fn test_delete_meeting_purges_fts() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "pass").unwrap();
+        let meeting = create_test_meeting();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+        storage.save_transcript_segments(id, &[segment(id, "zebra_unique_token")]).unwrap();
+        assert_eq!(storage.search_transcripts("zebra_unique_token", 10).unwrap().len(), 1);
+
+        storage.delete_meeting(id).unwrap();
+        assert!(storage.search_transcripts("zebra_unique_token", 10).unwrap().is_empty());
+    }
 }
