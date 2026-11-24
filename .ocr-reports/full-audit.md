@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 41 · skipped 4 · reverted 0 · open 39
+- **Remediation progress:** fixed 45 · skipped 5 · reverted 0 · open 34
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 20 fixed
+## Low (61) — 24 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -294,25 +294,29 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** The scanner accumulates characters into current_var while in_variable and only emits them when a closing }} is found. If the template ends with an unclosed placeholder (e.g. 'Summarize the transcript: {{transcript' — a plausible user typo in the template editor), everything from {{ onward is silently dropped and Ok is returned, so the rendered prompt loses the transcript instruction with no error. A nested '{{' inside a variable also clears current_var (line 15), discarding the text accumulated so far. (Positive note: substitution is single-pass over the template only, so substituted values containing {{...}} are NOT re-expanded — there is no recursive/unbounded expansion vulnerability.)
   - **Suggested fix:** On end-of-input with in_variable=true, either return Err(RecapError::Config('unclosed placeholder')) or emit the literal consumed text; treat a nested '{{' as literal content or an error rather than silently resetting.
 
-- [ ] **#46** `security` — Derived master key and passphrase copies are never zeroized despite zeroize being a declared dependency
+- [x] **#46** `security` — Derived master key and passphrase copies are never zeroized despite zeroize being a declared dependency — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/encryption_manager.rs:10-14`
   - **Root cause:** master_key is Arc<Mutex<Option<[u8; 32]>>> and derive_key returns/holds the key by value; unlock/replace_key leave old key copies in freed heap memory. zeroize 1.7 with zeroize_derive is in Cargo.toml but is not used anywhere in src. Key material (and the env passphrase String in main.rs) lingers in process memory, exposed via core dumps, swap, or memory-scraping malware — weakens the at-rest encryption guarantee for a sovereignty-focused product.
   - **Suggested fix:** Wrap the key in Zeroizing<[u8; 32]> (or a Zeroize-on-drop newtype), zeroize intermediate copies in derive_key/unlock/replace_key, and zeroize the passphrase String after StorageManager::new.
+  - **Verification:** master_key wrapped in Zeroizing<[u8;32]> (wiped on drop); derive_key returns Zeroizing; the passphrase in main() is wrapped in Zeroizing<String>. Uses the already-declared zeroize crate. Verified: cd desktop-app/src-tauri && cargo test -> 30 passed; cargo clippy --all-targets no new warnings.
 
-- [ ] **#47** `error-handling` — derive_key uses copy_from_slice with a 32.min(len) slice that panics if the Argon2 output is ever shorter than 32 bytes
+- [x] **#47** `error-handling` — derive_key uses copy_from_slice with a 32.min(len) slice that panics if the Argon2 output is ever shorter than 32 bytes — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/encryption_manager.rs:44-46`
   - **Root cause:** key.copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]) requires the source slice to be exactly 32 bytes; the .min() guard suggests intent to tolerate short hashes but actually guarantees a panic in that case. With Argon2::default() the output is always 32 bytes so this is currently unreachable, but any future parameter change (custom Params with shorter output) turns key derivation into a panic instead of an error.
   - **Suggested fix:** Check hash_bytes.len() == 32 and return RecapError::Encryption on mismatch, or use try_into()/copy_from_slice on a verified-length slice.
+  - **Verification:** derive_key now validates the Argon2 output length == 32 and returns an Encryption error on mismatch instead of copy_from_slice panicking (the old 32.min(len) slice guaranteed a panic for short outputs). Verified: cargo test -> 30 passed; clippy no new warnings.
 
-- [ ] **#48** `security` — FileStore joins caller-supplied relative paths without containment checks: absolute paths replace the data dir and '..' escapes it
+- [x] **#48** `security` — FileStore joins caller-supplied relative paths without containment checks: absolute paths replace the data dir and '..' escapes it — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/file_store.rs:27-60`
   - **Root cause:** write_encrypted_file/read_encrypted_file/write_plain_file/read_plain_file/exists all do self.data_dir.join(relative_path). Path::join with an absolute argument discards data_dir entirely, and '..' components traverse outside it; write_* also create_dir_all the escaped parent. No current caller passes untrusted input (these APIs are unused outside storage/mod.rs today), so this is a latent defect in a public API rather than an exploitable path today, but any future wiring to user-controlled names (e.g. prompt template names or import metadata) yields arbitrary file read/write.
   - **Suggested fix:** Reject absolute paths and normalize/verify the joined path stays under data_dir (e.g. components().any(|c| c == ParentDir) rejection plus canonicalize-based containment check) in a single helper used by all five methods.
+  - **Verification:** Added FileStore::resolve which rejects absolute paths and '..' (ParentDir) components before joining; write/read encrypted+plain and exists all route through it, confining paths to the data dir. Verified: cargo test -> 30 passed incl. resolve_rejects_absolute_and_traversal; clippy no new warnings.
 
-- [ ] **#49** `error-handling` — A corrupted salt.bin makes the app permanently unlaunchable via .expect panic with no recovery path or visible message
+- [x] **#49** `error-handling` — A corrupted salt.bin makes the app permanently unlaunchable via .expect panic with no recovery path or visible message — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/mod.rs:36-48`
   - **Root cause:** load_or_create_salt returns Err when salt.bin exists but is not exactly 32 bytes (partial write, disk corruption, tampering). StorageManager::new propagates it and main.rs:520-521 .expect()s, panicking before any window exists; on Windows release builds (windows_subsystem = "windows") the message is invisible. This is an extra concrete risk beyond the documented legacy zero-salt fallback: there is no quarantine/rename-and-recreate or user-facing recovery, and the user cannot even reach a UI to re-enter keys.
   - **Suggested fix:** On a corrupt salt file, rename it aside (salt.bin.corrupt), surface a recoverable startup error/dialog explaining that API keys must be re-saved, and recreate a fresh salt instead of panicking; write salt.bin atomically (temp file + rename) to prevent partial writes.
+  - **Verification:** load_or_create_salt quarantines a corrupt salt.bin to salt.bin.corrupt and creates a fresh salt (warning that API keys must be re-saved) instead of returning Err that main() .expect()s into an invisible startup panic; salt writes are now atomic (temp file + rename). Verified: cargo test -> 30 passed incl. test_corrupt_salt_recovers; clippy no new warnings.
 
 - [ ] **#50** `bug` — Raw user search text is passed to FTS5 MATCH, so ordinary queries containing quotes/parentheses/operators fail with a database syntax error
   - **Location:** `desktop-app/src-tauri/src/storage/sqlite_manager.rs:181-192`
@@ -329,10 +333,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** In save_transcript_segments, old rows are collected with rows.filter_map(|r| r.ok()) (any row that fails to deserialize is skipped, so its FTS entry is never retired) and each INSERT INTO transcript_search(...,'delete',...) is executed with let _ =, discarding errors. If a delete fails (e.g. text mismatch after external tampering), the stale entry remains and the subsequent re-index can leave the external-content index inconsistent, with no log or error surfaced.
   - **Suggested fix:** Propagate row-read errors (collect::<Result<Vec<_>>>()) and at least log/propagate FTS delete failures; consider 'rebuild' as a recovery path when retirement fails.
 
-- [ ] **#53** `bug` — From<String> for status enums silently maps unknown values to Deleted / PermanentlyFailed, misrepresenting corrupted or future-version rows
+- [ ] **#53** `bug` — From<String> for status enums silently maps unknown values to Deleted / PermanentlyFailed, misrepresenting corrupted or future-version rows — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/storage/types.rs:56-100`
   - **Root cause:** MeetingStatus::from maps any unrecognized string to Deleted and SyncStatus::from maps any unrecognized string to PermanentlyFailed (AudioSource falls back to SystemCapture). A corrupted value, a trailing-space variant, or a status written by a newer app version is silently reinterpreted as a terminal state — e.g. a perfectly valid meeting displays as 'Deleted' — with no error or log, unlike row_to_meeting which deliberately errors on an unparseable UUID.
   - **Suggested fix:** Return a parse error (or an explicit Unknown variant) for unrecognized strings and surface/log it, consistent with the UUID handling in row_to_meeting.
+  - **Verification:** Skipped (contract ripple beyond minimal scope): making From<String> fallible (TryFrom) or adding an Unknown variant changes row_to_meeting, the serde wire format, and the frontend status contract (statusLabel/isReady/CSS classes). Recommended follow-up: a dedicated Unknown variant + TryFrom migration with explicit frontend handling and logging, rather than silently mapping unknown values to Deleted/PermanentlyFailed.
 
 - [ ] **#54** `bug` — Default Anthropic model claude-3-sonnet-20240229 is retired; default path silently degrades to rule-based
   - **Location:** `desktop-app/src-tauri/src/summarization/providers/anthropic.rs:74`

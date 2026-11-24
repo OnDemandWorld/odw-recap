@@ -561,7 +561,9 @@
     "end_line": 14,
     "title": "Derived master key and passphrase copies are never zeroized despite zeroize being a declared dependency",
     "root_cause": "master_key is Arc<Mutex<Option<[u8; 32]>>> and derive_key returns/holds the key by value; unlock/replace_key leave old key copies in freed heap memory. zeroize 1.7 with zeroize_derive is in Cargo.toml but is not used anywhere in src. Key material (and the env passphrase String in main.rs) lingers in process memory, exposed via core dumps, swap, or memory-scraping malware — weakens the at-rest encryption guarantee for a sovereignty-focused product.",
-    "suggested_fix": "Wrap the key in Zeroizing<[u8; 32]> (or a Zeroize-on-drop newtype), zeroize intermediate copies in derive_key/unlock/replace_key, and zeroize the passphrase String after StorageManager::new."
+    "suggested_fix": "Wrap the key in Zeroizing<[u8; 32]> (or a Zeroize-on-drop newtype), zeroize intermediate copies in derive_key/unlock/replace_key, and zeroize the passphrase String after StorageManager::new.",
+    "status": "fixed",
+    "verification_notes": "master_key wrapped in Zeroizing<[u8;32]> (wiped on drop); derive_key returns Zeroizing; the passphrase in main() is wrapped in Zeroizing<String>. Uses the already-declared zeroize crate. Verified: cd desktop-app/src-tauri && cargo test -> 30 passed; cargo clippy --all-targets no new warnings."
   },
   {
     "id": 47,
@@ -572,7 +574,9 @@
     "end_line": 46,
     "title": "derive_key uses copy_from_slice with a 32.min(len) slice that panics if the Argon2 output is ever shorter than 32 bytes",
     "root_cause": "key.copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]) requires the source slice to be exactly 32 bytes; the .min() guard suggests intent to tolerate short hashes but actually guarantees a panic in that case. With Argon2::default() the output is always 32 bytes so this is currently unreachable, but any future parameter change (custom Params with shorter output) turns key derivation into a panic instead of an error.",
-    "suggested_fix": "Check hash_bytes.len() == 32 and return RecapError::Encryption on mismatch, or use try_into()/copy_from_slice on a verified-length slice."
+    "suggested_fix": "Check hash_bytes.len() == 32 and return RecapError::Encryption on mismatch, or use try_into()/copy_from_slice on a verified-length slice.",
+    "status": "fixed",
+    "verification_notes": "derive_key now validates the Argon2 output length == 32 and returns an Encryption error on mismatch instead of copy_from_slice panicking (the old 32.min(len) slice guaranteed a panic for short outputs). Verified: cargo test -> 30 passed; clippy no new warnings."
   },
   {
     "id": 48,
@@ -583,7 +587,9 @@
     "end_line": 60,
     "title": "FileStore joins caller-supplied relative paths without containment checks: absolute paths replace the data dir and '..' escapes it",
     "root_cause": "write_encrypted_file/read_encrypted_file/write_plain_file/read_plain_file/exists all do self.data_dir.join(relative_path). Path::join with an absolute argument discards data_dir entirely, and '..' components traverse outside it; write_* also create_dir_all the escaped parent. No current caller passes untrusted input (these APIs are unused outside storage/mod.rs today), so this is a latent defect in a public API rather than an exploitable path today, but any future wiring to user-controlled names (e.g. prompt template names or import metadata) yields arbitrary file read/write.",
-    "suggested_fix": "Reject absolute paths and normalize/verify the joined path stays under data_dir (e.g. components().any(|c| c == ParentDir) rejection plus canonicalize-based containment check) in a single helper used by all five methods."
+    "suggested_fix": "Reject absolute paths and normalize/verify the joined path stays under data_dir (e.g. components().any(|c| c == ParentDir) rejection plus canonicalize-based containment check) in a single helper used by all five methods.",
+    "status": "fixed",
+    "verification_notes": "Added FileStore::resolve which rejects absolute paths and '..' (ParentDir) components before joining; write/read encrypted+plain and exists all route through it, confining paths to the data dir. Verified: cargo test -> 30 passed incl. resolve_rejects_absolute_and_traversal; clippy no new warnings."
   },
   {
     "id": 49,
@@ -594,7 +600,9 @@
     "end_line": 48,
     "title": "A corrupted salt.bin makes the app permanently unlaunchable via .expect panic with no recovery path or visible message",
     "root_cause": "load_or_create_salt returns Err when salt.bin exists but is not exactly 32 bytes (partial write, disk corruption, tampering). StorageManager::new propagates it and main.rs:520-521 .expect()s, panicking before any window exists; on Windows release builds (windows_subsystem = \"windows\") the message is invisible. This is an extra concrete risk beyond the documented legacy zero-salt fallback: there is no quarantine/rename-and-recreate or user-facing recovery, and the user cannot even reach a UI to re-enter keys.",
-    "suggested_fix": "On a corrupt salt file, rename it aside (salt.bin.corrupt), surface a recoverable startup error/dialog explaining that API keys must be re-saved, and recreate a fresh salt instead of panicking; write salt.bin atomically (temp file + rename) to prevent partial writes."
+    "suggested_fix": "On a corrupt salt file, rename it aside (salt.bin.corrupt), surface a recoverable startup error/dialog explaining that API keys must be re-saved, and recreate a fresh salt instead of panicking; write salt.bin atomically (temp file + rename) to prevent partial writes.",
+    "status": "fixed",
+    "verification_notes": "load_or_create_salt quarantines a corrupt salt.bin to salt.bin.corrupt and creates a fresh salt (warning that API keys must be re-saved) instead of returning Err that main() .expect()s into an invisible startup panic; salt writes are now atomic (temp file + rename). Verified: cargo test -> 30 passed incl. test_corrupt_salt_recovers; clippy no new warnings."
   },
   {
     "id": 50,
@@ -638,7 +646,9 @@
     "end_line": 100,
     "title": "From<String> for status enums silently maps unknown values to Deleted / PermanentlyFailed, misrepresenting corrupted or future-version rows",
     "root_cause": "MeetingStatus::from maps any unrecognized string to Deleted and SyncStatus::from maps any unrecognized string to PermanentlyFailed (AudioSource falls back to SystemCapture). A corrupted value, a trailing-space variant, or a status written by a newer app version is silently reinterpreted as a terminal state — e.g. a perfectly valid meeting displays as 'Deleted' — with no error or log, unlike row_to_meeting which deliberately errors on an unparseable UUID.",
-    "suggested_fix": "Return a parse error (or an explicit Unknown variant) for unrecognized strings and surface/log it, consistent with the UUID handling in row_to_meeting."
+    "suggested_fix": "Return a parse error (or an explicit Unknown variant) for unrecognized strings and surface/log it, consistent with the UUID handling in row_to_meeting.",
+    "status": "skipped",
+    "verification_notes": "Skipped (contract ripple beyond minimal scope): making From<String> fallible (TryFrom) or adding an Unknown variant changes row_to_meeting, the serde wire format, and the frontend status contract (statusLabel/isReady/CSS classes). Recommended follow-up: a dedicated Unknown variant + TryFrom migration with explicit frontend handling and logging, rather than silently mapping unknown values to Deleted/PermanentlyFailed."
   },
   {
     "id": 54,

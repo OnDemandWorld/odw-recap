@@ -280,4 +280,20 @@ mod tests {
         // The original key must still decrypt (key was not swapped).
         assert_eq!(storage.get_api_key("openai").unwrap(), Some("sk-secret".to_string()));
     }
+
+    // Audit #49: a corrupt salt.bin must not panic startup — it is quarantined
+    // and a fresh 32-byte salt is created so the app can launch.
+    #[test]
+    fn test_corrupt_salt_recovers() {
+        let temp_dir = TempDir::new().unwrap();
+        let salt_path = temp_dir.path().join("salt.bin");
+        std::fs::write(&salt_path, b"too-short").unwrap(); // 9 bytes, not 32
+
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "pass");
+        assert!(storage.is_ok(), "corrupt salt must not prevent startup");
+
+        assert!(temp_dir.path().join("salt.bin.corrupt").exists(), "old salt quarantined");
+        let new_salt = std::fs::read(&salt_path).unwrap();
+        assert_eq!(new_salt.len(), 32, "fresh salt must be 32 bytes");
+    }
 }

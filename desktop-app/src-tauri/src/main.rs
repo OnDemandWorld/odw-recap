@@ -507,7 +507,8 @@ fn main() {
     // RECAP_ENCRYPTION_PASSPHRASE is unset we fall back to an empty passphrase
     // and emit a loud warning — a documented development-only convenience, not
     // a production default. Production deployments MUST set the variable.
-    let encryption_passphrase =
+    // Audit #46: Zeroizing wipes the passphrase from memory after use.
+    let encryption_passphrase = zeroize::Zeroizing::new(
         std::env::var("RECAP_ENCRYPTION_PASSPHRASE").unwrap_or_else(|_| {
             eprintln!(
                 "WARNING: RECAP_ENCRYPTION_PASSPHRASE is not set; falling back to an \
@@ -515,7 +516,8 @@ fn main() {
                  protected by a meaningful encryption key."
             );
             String::new()
-        });
+        }),
+    );
 
     let storage = StorageManager::new(data_dir.clone(), &encryption_passphrase)
         .expect("Failed to initialize storage");
