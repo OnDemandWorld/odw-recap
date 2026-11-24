@@ -1,7 +1,7 @@
 # Recap by ODW.ai — Full-Repository Code Audit & Remediation
 
 **Mode:** Open Code Review — delegation (host-model analysis; no external OCR binary, no separate API config).
-**Audit branch:** `dev` (tip `0d15a74`). **Fix branch:** `fix/ocr-audit-round-1` (off `dev`; for head-coder review/merge — not merged to master). **Date:** 2026-11-24.
+**Audit branch:** `dev` (tip `0d15a74`). **Fix branch:** `fix/ocr-audit-round-1` (off `dev`; PR #1 for head-coder review/merge — not merged to master). **Date:** 2026-11-25.
 **Scope:** All existing source code (full-file read), not just recent git diffs. Dependency dirs, build outputs, lockfiles, binaries, and media/data assets excluded.
 
 ## Baseline (before any edits)
@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 21 · skipped 2 · reverted 0 · open 61
+- **Remediation progress:** fixed 26 · skipped 2 · reverted 0 · open 56
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 0 fixed
+## Low (61) — 5 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -428,35 +428,40 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** adminListUsersHandler (line 38), adminAuditLogHandler (line 67) and count (line 123) use s.db.DB().Query/QueryRow without a context, as do registerHandler (auth_handlers.go:102,117) and loginHandler (auth_handlers.go:165). chi's Timeout(60s) and client disconnects cancel r.Context(), but these queries keep running to completion, holding connections and doing work whose results are discarded — unlike the meeting store, which consistently uses ExecContext/QueryContext.
   - **Suggested fix:** Pass r.Context() to all request-scoped queries (QueryContext/QueryRowContext/ExecContext), matching the meeting store's pattern.
 
-- [ ] **#74** `bug` — Registration does not bound email length to the VARCHAR(255) column, turning bad input into a 500
+- [x] **#74** `bug` — Registration does not bound email length to the VARCHAR(255) column, turning bad input into a 500 — **FIXED**
   - **Location:** `team-server/internal/api/auth_handlers.go:59-76`
   - **Root cause:** validateRegisterRequest checks name <= 255 but never checks email length; emailPattern matches arbitrarily long addresses. users.email is VARCHAR(255) (database.go:75), so a syntactically valid 256+ character email passes validation, reaches the INSERT, fails with pq 22001 (not 23505), and is reported as 500 'Failed to create user' instead of a 400 validation error.
   - **Suggested fix:** Add len(req.Email) > 255 to validateRegisterRequest (and consider an overall request-size sanity bound) so over-length emails are rejected with 400.
+  - **Verification:** validateRegisterRequest now rejects len(email) > 255 with a 400 ('Email is too long') before the INSERT. Verified: cd team-server && go test ./... ok incl. TestValidateRegister_EmailTooLong; go vet 0; gofmt clean.
 
-- [ ] **#75** `bug` — Meeting create/update accept over-length meeting_type/language, producing 500s instead of 400s
+- [x] **#75** `bug` — Meeting create/update accept over-length meeting_type/language, producing 500s instead of 400s — **FIXED**
   - **Location:** `team-server/internal/api/meeting_handlers.go:90-111`
   - **Root cause:** createMeetingHandler copies req.MeetingType and req.Language straight into the INSERT, and updateMeetingHandler (lines 191-194) into the UPDATE, without length validation. The columns are meeting_type VARCHAR(100) and language VARCHAR(10) (database.go:106,108); a client sending longer values (allowed by the 4 MiB body cap) gets pq 22001 and a generic 500 'Failed to create/update meeting' rather than a validation error. Title is unbounded TEXT, so a ~4 MiB title is also accepted and later uploaded verbatim to Vault.
   - **Suggested fix:** Validate meeting_type <= 100, language <= 10 (and a sane title bound) in the handlers and return 400 with a field-specific message; consider an allowlist for language codes.
+  - **Verification:** Added validateMeetingFields (meeting_type<=100, language<=10, title<=1000) called in createMeetingHandler and updateMeetingHandler, returning 400 instead of a pq 22001 500. Verified: go test ./... ok incl. TestValidateMeetingFields and TestCreateMeeting_RejectsOverLengthLanguage; go vet 0; gofmt clean.
 
 - [ ] **#76** `security` — CORS defaults to wildcard origin when ALLOWED_ORIGINS is unset
   - **Location:** `team-server/internal/api/server.go:32`
   - **Root cause:** DefaultAllowedOrigins = ["*"] is used unless ALLOWED_ORIGINS is configured (main.go:84-90,125-127). With AllowCredentials=false this is not classic CSRF, but it lets ANY website read API responses cross-origin whenever a bearer token is available to browser JavaScript (e.g. stored in localStorage or obtained via XSS elsewhere), removing origin as a defense layer. The code comment says keep '*' only for development, yet it is the out-of-the-box production behavior.
   - **Suggested fix:** Fail closed or warn loudly when ALLOWED_ORIGINS is unset in production; require an explicit origin allowlist for browser-facing deployments.
 
-- [ ] **#77** `error-handling` — Audit entries silently lost when RemoteAddr exceeds ip_address VARCHAR(45) (IPv6 host:port)
+- [x] **#77** `error-handling` — Audit entries silently lost when RemoteAddr exceeds ip_address VARCHAR(45) (IPv6 host:port) — **FIXED**
   - **Location:** `team-server/internal/api/store.go:163`
   - **Root cause:** writeAudit stores r.RemoteAddr verbatim, including the port. A full-form IPv6 peer address renders as '[39-char IPv6]:port' = up to 47 characters, exceeding audit_log.ip_address VARCHAR(45) (database.go:189). The INSERT then fails with 'value too long' and dbAuditLogger.Log swallows it (store.go:148-150), so every audited action from such a client completes with NO audit row. A client that can choose its source IPv6 address (no compressible zero groups) can thereby act without an audit trail.
   - **Suggested fix:** Store only the host (net.SplitHostPort) and/or widen the column (INET type or VARCHAR(64)); validate/truncate the IP before insert so audit writes cannot fail on address length.
+  - **Verification:** writeAudit stores clientIP(r.RemoteAddr) (host only via net.SplitHostPort) so a full-form IPv6 peer no longer overflows ip_address VARCHAR(45) and drops the audit row. Verified: go test ./... ok incl. TestClientIP_StripsPortAndHandlesIPv6 (asserts <=45 chars); go vet 0; gofmt clean.
 
-- [ ] **#78** `error-handling` — Audit write for an already-committed mutation uses the cancellable request context
+- [x] **#78** `error-handling` — Audit write for an already-committed mutation uses the cancellable request context — **FIXED**
   - **Location:** `team-server/internal/api/store.go:176`
   - **Root cause:** writeAudit calls s.audit.Log(r.Context(), ...) AFTER the create/update/delete/sync has committed. If the client disconnects in that window or chi's 60s Timeout fires, the request context is cancelled and the audit ExecContext fails; the failure is swallowed as best-effort, so a completed, security-relevant action can end up with no audit record.
   - **Suggested fix:** Use context.WithoutCancel(r.Context()) (Go 1.21+) or a fresh short-timeout background context for audit writes so they survive client disconnect and request timeout.
+  - **Verification:** writeAudit now logs with context.WithoutCancel(r.Context()) so a client disconnect / request timeout after the mutation committed cannot drop the audit record. Verified: go test ./... ok; go vet 0; gofmt clean. (Behavioral disconnect test needs a live DB; not added.)
 
-- [ ] **#79** `security` — Partial-sync response leaks internal URLs and upstream error bodies to any authenticated user
+- [x] **#79** `security` — Partial-sync response leaks internal URLs and upstream error bodies to any authenticated user — **FIXED**
   - **Location:** `team-server/internal/api/sync_handlers.go:160-165`
   - **Root cause:** On forward failure the handler returns Message: fmt.Sprintf("Sync completed with errors: %v", err). The joined error wraps *url.Error (containing the full internal VAULT_API_URL/LOOP_API_URL, e.g. http://localhost:8765/files/upload) and the raw Vault/Loop response body (forwarder.go:95,101,145,151). Any member-level account can thus enumerate internal infrastructure and upstream error details simply by syncing while a target is down.
   - **Suggested fix:** Return a generic client-facing message (e.g. 'Sync queued for retry') and keep detailed errors in server logs and sync_queue.last_error only.
+  - **Verification:** Partial-sync response Message is now a generic 'Sync completed with errors; queued for retry'; the joined error (internal Vault/Loop URLs + upstream bodies) stays in the log and sync_queue.last_error only. Removed the now-unused fmt import. Verified: go test ./... ok; go vet 0; gofmt clean.
 
 - [ ] **#80** `security` — Authorization relies solely on 24h JWT claims with no revocation or DB revalidation
   - **Location:** `team-server/internal/auth/middleware.go:46-51`
@@ -489,14 +494,14 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
 ## Final verification (whole fix branch)
 
-Run after all High + Medium batches were applied:
+Run after High + Medium batches (re-run as Low batches land):
 
 | Suite | Command | Result |
 |-------|---------|--------|
 | Rust | `cd desktop-app/src-tauri && cargo test` | 28 passed, 0 failed (baseline 15) |
-| Rust lint | `cargo clippy --all-targets` | exit 0; no new warnings vs baseline (pre-existing stub dead-code/unused-import warnings remain) |
+| Rust lint | `cargo clippy --all-targets` | exit 0; no new warnings vs baseline |
 | Go | `cd team-server && go vet ./... && go test ./...` | vet 0; all packages ok |
 | Go format | `gofmt -l internal/ cmd/` | clean |
 | Frontend | `cd desktop-app && npm test` | 25 passed, 2 suites (baseline 22) |
 
-No new lint/type/test failures beyond the pre-existing baseline (`cargo fmt --check` was already non-clean before this work and was not mass-reformatted). Two Medium items are intentionally skipped with rationale (#17 custom-prompt feature wiring, #22 per-target sync retry state); all 61 Low items remain open for a future pass.
+No new lint/type/test failures beyond the pre-existing baseline (`cargo fmt --check` was already non-clean before this work and was not mass-reformatted). Skipped items carry a rationale; remaining open items are itemized above for future passes.

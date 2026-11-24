@@ -26,6 +26,23 @@ func (s *Server) canAccess(user *models.User, meeting *models.Meeting) bool {
 	return meeting.CreatedBy != nil && *meeting.CreatedBy == user.ID
 }
 
+// validateMeetingFields bounds the fields backed by fixed-width columns so an
+// over-length value returns a 400 instead of a pq 22001 500 (audit #75).
+// meeting_type VARCHAR(100), language VARCHAR(10); title is TEXT but bounded to
+// keep absurd payloads out of the Vault upload.
+func validateMeetingFields(req *models.Meeting) string {
+	if req.MeetingType != nil && len(*req.MeetingType) > 100 {
+		return "meeting_type is too long (max 100 characters)"
+	}
+	if req.Language != nil && len(*req.Language) > 10 {
+		return "language is too long (max 10 characters)"
+	}
+	if req.Title != nil && len(*req.Title) > 1000 {
+		return "title is too long (max 1000 characters)"
+	}
+	return ""
+}
+
 // listMeetingsPagination bounds and normalizes ?limit / ?offset.
 func listMeetingsPagination(r *http.Request) (limit, offset int) {
 	limit, offset = 100, 0
@@ -100,6 +117,10 @@ func (s *Server) createMeetingHandler(w http.ResponseWriter, r *http.Request) {
 	// meeting and /sync referenced a nonexistent row. Honor a client-supplied
 	// id: create it when new, return 409 when the caller already owns it, and
 	// 403 when it belongs to another tenant (never overwrite another's row).
+	if msg := validateMeetingFields(&req); msg != "" {
+		respondError(w, http.StatusBadRequest, msg)
+		return
+	}
 	meetingID := uuid.New()
 	if req.ID != uuid.Nil {
 		existing, err := s.meetings.Get(r.Context(), req.ID)
@@ -213,6 +234,11 @@ func (s *Server) updateMeetingHandler(w http.ResponseWriter, r *http.Request) {
 
 	if !s.canAccess(user, meeting) {
 		respondError(w, http.StatusForbidden, "You do not have access to this meeting")
+		return
+	}
+
+	if msg := validateMeetingFields(&req); msg != "" {
+		respondError(w, http.StatusBadRequest, msg)
 		return
 	}
 

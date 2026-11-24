@@ -70,6 +70,10 @@ func validateRegisterRequest(req *RegisterRequest) string {
 		return "Email, password, and name are required"
 	case !emailPattern.MatchString(req.Email):
 		return "Invalid email address"
+	case len(req.Email) > 255:
+		// Audit #74: users.email is VARCHAR(255); an over-length address would
+		// otherwise reach the INSERT and surface as a 500 (pq 22001), not a 400.
+		return "Email is too long"
 	case len(req.Name) > 255:
 		return "Name is too long"
 	case len(req.Password) < 8:

@@ -857,7 +857,9 @@
     "end_line": 76,
     "title": "Registration does not bound email length to the VARCHAR(255) column, turning bad input into a 500",
     "root_cause": "validateRegisterRequest checks name <= 255 but never checks email length; emailPattern matches arbitrarily long addresses. users.email is VARCHAR(255) (database.go:75), so a syntactically valid 256+ character email passes validation, reaches the INSERT, fails with pq 22001 (not 23505), and is reported as 500 'Failed to create user' instead of a 400 validation error.",
-    "suggested_fix": "Add len(req.Email) > 255 to validateRegisterRequest (and consider an overall request-size sanity bound) so over-length emails are rejected with 400."
+    "suggested_fix": "Add len(req.Email) > 255 to validateRegisterRequest (and consider an overall request-size sanity bound) so over-length emails are rejected with 400.",
+    "status": "fixed",
+    "verification_notes": "validateRegisterRequest now rejects len(email) > 255 with a 400 ('Email is too long') before the INSERT. Verified: cd team-server && go test ./... ok incl. TestValidateRegister_EmailTooLong; go vet 0; gofmt clean."
   },
   {
     "id": 75,
@@ -868,7 +870,9 @@
     "end_line": 111,
     "title": "Meeting create/update accept over-length meeting_type/language, producing 500s instead of 400s",
     "root_cause": "createMeetingHandler copies req.MeetingType and req.Language straight into the INSERT, and updateMeetingHandler (lines 191-194) into the UPDATE, without length validation. The columns are meeting_type VARCHAR(100) and language VARCHAR(10) (database.go:106,108); a client sending longer values (allowed by the 4 MiB body cap) gets pq 22001 and a generic 500 'Failed to create/update meeting' rather than a validation error. Title is unbounded TEXT, so a ~4 MiB title is also accepted and later uploaded verbatim to Vault.",
-    "suggested_fix": "Validate meeting_type <= 100, language <= 10 (and a sane title bound) in the handlers and return 400 with a field-specific message; consider an allowlist for language codes."
+    "suggested_fix": "Validate meeting_type <= 100, language <= 10 (and a sane title bound) in the handlers and return 400 with a field-specific message; consider an allowlist for language codes.",
+    "status": "fixed",
+    "verification_notes": "Added validateMeetingFields (meeting_type<=100, language<=10, title<=1000) called in createMeetingHandler and updateMeetingHandler, returning 400 instead of a pq 22001 500. Verified: go test ./... ok incl. TestValidateMeetingFields and TestCreateMeeting_RejectsOverLengthLanguage; go vet 0; gofmt clean."
   },
   {
     "id": 76,
@@ -890,7 +894,9 @@
     "end_line": 163,
     "title": "Audit entries silently lost when RemoteAddr exceeds ip_address VARCHAR(45) (IPv6 host:port)",
     "root_cause": "writeAudit stores r.RemoteAddr verbatim, including the port. A full-form IPv6 peer address renders as '[39-char IPv6]:port' = up to 47 characters, exceeding audit_log.ip_address VARCHAR(45) (database.go:189). The INSERT then fails with 'value too long' and dbAuditLogger.Log swallows it (store.go:148-150), so every audited action from such a client completes with NO audit row. A client that can choose its source IPv6 address (no compressible zero groups) can thereby act without an audit trail.",
-    "suggested_fix": "Store only the host (net.SplitHostPort) and/or widen the column (INET type or VARCHAR(64)); validate/truncate the IP before insert so audit writes cannot fail on address length."
+    "suggested_fix": "Store only the host (net.SplitHostPort) and/or widen the column (INET type or VARCHAR(64)); validate/truncate the IP before insert so audit writes cannot fail on address length.",
+    "status": "fixed",
+    "verification_notes": "writeAudit stores clientIP(r.RemoteAddr) (host only via net.SplitHostPort) so a full-form IPv6 peer no longer overflows ip_address VARCHAR(45) and drops the audit row. Verified: go test ./... ok incl. TestClientIP_StripsPortAndHandlesIPv6 (asserts <=45 chars); go vet 0; gofmt clean."
   },
   {
     "id": 78,
@@ -901,7 +907,9 @@
     "end_line": 176,
     "title": "Audit write for an already-committed mutation uses the cancellable request context",
     "root_cause": "writeAudit calls s.audit.Log(r.Context(), ...) AFTER the create/update/delete/sync has committed. If the client disconnects in that window or chi's 60s Timeout fires, the request context is cancelled and the audit ExecContext fails; the failure is swallowed as best-effort, so a completed, security-relevant action can end up with no audit record.",
-    "suggested_fix": "Use context.WithoutCancel(r.Context()) (Go 1.21+) or a fresh short-timeout background context for audit writes so they survive client disconnect and request timeout."
+    "suggested_fix": "Use context.WithoutCancel(r.Context()) (Go 1.21+) or a fresh short-timeout background context for audit writes so they survive client disconnect and request timeout.",
+    "status": "fixed",
+    "verification_notes": "writeAudit now logs with context.WithoutCancel(r.Context()) so a client disconnect / request timeout after the mutation committed cannot drop the audit record. Verified: go test ./... ok; go vet 0; gofmt clean. (Behavioral disconnect test needs a live DB; not added.)"
   },
   {
     "id": 79,
@@ -912,7 +920,9 @@
     "end_line": 165,
     "title": "Partial-sync response leaks internal URLs and upstream error bodies to any authenticated user",
     "root_cause": "On forward failure the handler returns Message: fmt.Sprintf(\"Sync completed with errors: %v\", err). The joined error wraps *url.Error (containing the full internal VAULT_API_URL/LOOP_API_URL, e.g. http://localhost:8765/files/upload) and the raw Vault/Loop response body (forwarder.go:95,101,145,151). Any member-level account can thus enumerate internal infrastructure and upstream error details simply by syncing while a target is down.",
-    "suggested_fix": "Return a generic client-facing message (e.g. 'Sync queued for retry') and keep detailed errors in server logs and sync_queue.last_error only."
+    "suggested_fix": "Return a generic client-facing message (e.g. 'Sync queued for retry') and keep detailed errors in server logs and sync_queue.last_error only.",
+    "status": "fixed",
+    "verification_notes": "Partial-sync response Message is now a generic 'Sync completed with errors; queued for retry'; the joined error (internal Vault/Loop URLs + upstream bodies) stays in the log and sync_queue.last_error only. Removed the now-unused fmt import. Verified: go test ./... ok; go vet 0; gofmt clean."
   },
   {
     "id": 80,
