@@ -96,13 +96,14 @@ impl LLMProvider for OllamaProvider {
             }
         })?;
 
-        Ok(SummarizationResult {
-            summary: ollama_response.response,
-            action_items: Vec::new(),
-            decisions: Vec::new(),
-            key_points: Vec::new(),
-            provider: "ollama".to_string(),
-        })
+        // Audit #16: the prompt requests structured JSON, so parse it exactly
+        // like openai.rs/anthropic.rs (R-3). Previously the raw JSON prose was
+        // stored as the summary with action_items/decisions/key_points hard-coded
+        // empty, silently severing the Recap→Loop webhook chain.
+        Ok(crate::summarization::llm_provider::parse_structured_summary(
+            &ollama_response.response,
+            "ollama",
+        ))
     }
 
     fn supported_models(&self) -> Vec<String> {

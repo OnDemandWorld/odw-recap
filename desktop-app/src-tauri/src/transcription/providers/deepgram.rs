@@ -41,6 +41,46 @@ struct DeepgramWord {
     confidence: f64,
 }
 
+/// Audit #18: map the audio file extension to the MIME type Deepgram uses to
+/// pick its decoder. The previous hardcoded "audio/mpeg" mislabeled m4a/wav/flac
+/// (the default phone-upload format is m4a), producing decode errors or garbled
+/// transcripts. Unknown extensions fall back to octet-stream so Deepgram sniffs.
+fn audio_mime_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("m4a") | Some("mp4") => "audio/mp4",
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
+        Some("webm") => "audio/webm",
+        Some("flac") => "audio/flac",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Audit #18: the default phone-upload format (m4a) must not be labeled mp3.
+    #[test]
+    fn audio_mime_type_matches_extension() {
+        assert_eq!(audio_mime_type(Path::new("rec.m4a")), "audio/mp4");
+        assert_eq!(audio_mime_type(Path::new("rec.M4A")), "audio/mp4");
+        assert_eq!(audio_mime_type(Path::new("rec.wav")), "audio/wav");
+        assert_eq!(audio_mime_type(Path::new("rec.mp3")), "audio/mpeg");
+        assert_eq!(audio_mime_type(Path::new("rec.ogg")), "audio/ogg");
+        assert_eq!(audio_mime_type(Path::new("rec.webm")), "audio/webm");
+        assert_eq!(audio_mime_type(Path::new("rec.flac")), "audio/flac");
+        assert_eq!(audio_mime_type(Path::new("rec.unknown")), "application/octet-stream");
+        assert_eq!(audio_mime_type(Path::new("noext")), "application/octet-stream");
+    }
+}
+
 impl DeepgramProvider {
     pub fn new(api_key: Option<String>) -> Self {
         Self {
@@ -104,7 +144,7 @@ impl STTProvider for DeepgramProvider {
             .client
             .post(url)
             .header("Authorization", format!("Token {}", api_key))
-            .header("Content-Type", "audio/mpeg")
+            .header("Content-Type", audio_mime_type(audio_path))
             .body(audio_data)
             .send()
             .await
