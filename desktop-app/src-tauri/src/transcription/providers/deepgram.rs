@@ -136,13 +136,12 @@ impl STTProvider for DeepgramProvider {
             .language
             .clone()
             .unwrap_or_else(|| "en".to_string());
-        let url = format!(
-            "https://api.deepgram.com/v1/listen?punctuate=true&language={}",
-            language
-        );
         let response = self
             .client
-            .post(url)
+            .post("https://api.deepgram.com/v1/listen")
+            // Audit #64: percent-encode query params (a language containing
+            // '&'/'='/'#' previously injected/truncated the query string).
+            .query(&[("punctuate", "true"), ("language", language.as_str())])
             .header("Authorization", format!("Token {}", api_key))
             .header("Content-Type", audio_mime_type(audio_path))
             .body(audio_data)
@@ -235,6 +234,15 @@ impl STTProvider for DeepgramProvider {
         } else {
             Vec::new()
         };
+
+        // Audit #65: a 200 with no transcript content must not silently complete
+        // the meeting with an empty transcript — surface an actionable error.
+        if segments.is_empty() {
+            return Err(RecapError::Transcription(
+                "Deepgram returned no transcript content (no speech detected or empty result)"
+                    .to_string(),
+            ));
+        }
 
         Ok(TranscriptionResult {
             segments,
