@@ -64,6 +64,10 @@ impl EncryptionManager {
             .unwrap_or(false)
     }
 
+    // Retained for the future passphrase re-encryption flow. change_passphrase
+    // currently refuses (audit #14) rather than swap the key and brick stored
+    // data, so this has no caller yet.
+    #[allow(dead_code)]
     pub fn replace_key(&self, new_key: [u8; 32]) -> Result<()> {
         let mut guard = self.master_key.lock().map_err(|_| {
             RecapError::Encryption("Failed to lock master key".to_string())

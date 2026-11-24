@@ -103,11 +103,14 @@ impl StorageManager {
         })
     }
 
-    pub fn change_passphrase(&self, new_passphrase: &str) -> Result<()> {
-        let new_key = self.encryption.derive_key(new_passphrase)?;
-        // In a full implementation, we would re-encrypt all existing data here
-        // For now, we just re-derive and update the in-memory key
-        self.encryption.replace_key(new_key)
+    pub fn change_passphrase(&self, _new_passphrase: &str) -> Result<()> {
+        // Audit #14: swapping the in-memory key without re-encrypting stored
+        // data permanently bricks every saved API key (they were encrypted with
+        // the old key, which is then discarded). Until full re-encryption is
+        // implemented, refuse the operation instead of destroying credentials.
+        Err(RecapError::Encryption(
+            "change_passphrase is not implemented: stored data must be re-encrypted with the new key first; refusing to swap the key and lose saved API keys".to_string(),
+        ))
     }
 
     pub fn get_data_dir(&self) -> &Path {
@@ -139,12 +142,44 @@ impl StorageManager {
         self.db.update_meeting(meeting)
     }
 
+    pub fn update_sync_status(&self, id: Uuid, sync_status: &SyncStatus) -> Result<()> {
+        self.db.update_sync_status(id, sync_status)
+    }
+
     pub fn list_meetings(&self, limit: i64, offset: i64) -> Result<Vec<Meeting>> {
         self.db.list_meetings(limit, offset)
     }
 
     pub fn delete_meeting(&self, id: Uuid) -> Result<()> {
-        self.db.delete_meeting(id)
+        // Audit #12: a privacy-first delete must erase the recording too, not
+        // just the DB rows. Capture the audio path before deleting, then remove
+        // the file — but only when it lives inside the managed data directory.
+        let audio_path = self.db.get_meeting(id)?.map(|m| m.audio_file_path);
+        self.db.delete_meeting(id)?;
+        if let Some(path) = audio_path {
+            self.remove_managed_audio(&path);
+        }
+        Ok(())
+    }
+
+    /// Best-effort removal of a meeting audio file, confined to the data dir so
+    /// a crafted audio_file_path can never delete an arbitrary file.
+    fn remove_managed_audio(&self, path: &Path) {
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(_) => return, // already gone / unreadable — nothing to remove
+        };
+        let data_dir = match std::fs::canonicalize(&self.data_dir) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if canonical.starts_with(&data_dir) {
+            if let Err(e) = std::fs::remove_file(&canonical) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("delete_meeting: failed to remove audio {}: {}", canonical.display(), e);
+                }
+            }
+        }
     }
 
     pub fn search_transcripts(&self, query: &str, limit: i64) -> Result<Vec<(Uuid, String)>> {

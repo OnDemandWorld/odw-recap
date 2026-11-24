@@ -661,7 +661,7 @@ async fn sync_meeting_to_team_server(
 
     // Gather the payload from local storage, then release the lock before
     // any network I/O (locks must never span await points).
-    let (mut meeting, transcript, summary, action_items) = {
+    let (meeting, transcript, summary, action_items) = {
         let storage = lock_storage(&state)?;
         let meeting = storage
             .get_meeting(meeting_id)?
@@ -712,11 +712,13 @@ async fn sync_meeting_to_team_server(
         "action_items": action_items,
     });
 
-    // Persist the attempt before the network call.
-    meeting.sync_status = SyncStatus::Syncing;
+    // Persist the attempt before the network call. Audit #13: write only the
+    // sync_status column — a full update_meeting(&meeting) here would clobber
+    // any concurrent update (e.g. process_meeting completing) with this stale
+    // snapshot once the network call returns.
     {
         let storage = lock_storage(&state)?;
-        storage.update_meeting(&meeting)?;
+        storage.update_sync_status(meeting_id, &SyncStatus::Syncing)?;
     }
 
     let result = state
@@ -736,18 +738,16 @@ async fn sync_meeting_to_team_server(
             };
             let message = resp.message.clone();
             let status_str = resp.status.clone();
-            meeting.sync_status = status;
             {
                 let storage = lock_storage(&state)?;
-                storage.update_meeting(&meeting)?;
+                storage.update_sync_status(meeting_id, &status)?;
             }
             Ok(format!("{}: {}", status_str, message))
         }
         Err(e) => {
-            meeting.sync_status = SyncStatus::Failed;
             {
                 let storage = lock_storage(&state)?;
-                storage.update_meeting(&meeting)?;
+                storage.update_sync_status(meeting_id, &SyncStatus::Failed)?;
             }
             Err(e)
         }

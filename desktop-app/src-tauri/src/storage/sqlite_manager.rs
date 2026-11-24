@@ -2,6 +2,7 @@ use crate::error::{RecapError, Result};
 use crate::storage::types::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub struct SqliteManager {
@@ -11,6 +12,11 @@ pub struct SqliteManager {
 impl SqliteManager {
     pub fn new(db_path: &PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
+        // Audit #15: StorageManager and ConfigManager open separate connections
+        // to recap.db under different mutexes. WAL permits only one writer at a
+        // time; without a busy_timeout the second writer fails immediately with
+        // "database is locked". Block briefly instead of erroring.
+        conn.busy_timeout(Duration::from_secs(5))?;
         let manager = Self { conn };
         manager.migrate()?;
         Ok(manager)
@@ -262,6 +268,20 @@ impl SqliteManager {
 
     pub fn delete_meeting(&self, id: Uuid) -> Result<()> {
         self.conn.execute("DELETE FROM meetings WHERE id = ?1", params![id.to_string()])?;
+        Ok(())
+    }
+
+    /// Audit #13: update only the sync_status column (and updated_at) so a
+    /// long-running sync cannot clobber other fields with a stale snapshot.
+    pub fn update_sync_status(&self, id: Uuid, sync_status: &SyncStatus) -> Result<()> {
+        self.conn.execute(
+            "UPDATE meetings SET sync_status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                id.to_string(),
+                sync_status.to_string(),
+                chrono::Utc::now().timestamp_millis()
+            ],
+        )?;
         Ok(())
     }
 

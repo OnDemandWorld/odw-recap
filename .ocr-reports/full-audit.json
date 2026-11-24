@@ -138,7 +138,9 @@
     "end_line": 73,
     "title": "Config values written raw by set_string/set_config break typed getters that JSON-decode, so watch-folder and HTTP-upload startup fail after saving provider settings",
     "root_cause": "ConfigManager has two incompatible encodings for the same keys: set_string()/the set_config Tauri command store the raw string (e.g. 'openai'), while get::<T>() runs serde_json::from_str on the stored value. The frontend (desktop-app/src/main.js persistSetting -> invoke('set_config', {key:'stt_provider', value:'openai'}')) writes raw strings. stt_provider()/llm_provider() (config/mod.rs:103-115) use get::<String>, so serde_json::from_str::<String>(\"openai\") fails with 'expected value at line 1 column 1'. Concrete failure: user picks OpenAI/Deepgram in Settings, then start_watch_folder (main.rs:237) or start_http_upload_server (main.rs:453) calls config.stt_provider() and returns a JSON error, while create_meeting (which uses get_string) works — inconsistent behavior for the same setting.",
-    "suggested_fix": "Use one encoding convention per key: either make stt_provider()/llm_provider() read via get_string() (raw) like create_meeting does, or make set_config JSON-encode strings and migrate existing raw values. Add a test that writes via set_string and reads via the typed getter."
+    "suggested_fix": "Use one encoding convention per key: either make stt_provider()/llm_provider() read via get_string() (raw) like create_meeting does, or make set_config JSON-encode strings and migrate existing raw values. Add a test that writes via set_string and reads via the typed getter.",
+    "status": "fixed",
+    "verification_notes": "stt_provider()/llm_provider() now read via get_string (raw), matching how set_config/set_string write; previously get::<String> JSON-decoded a bare string like 'openai' and errored, breaking watch-folder/HTTP-upload startup. Verified: cd desktop-app/src-tauri && cargo test -> 27 passed incl. provider_getters_read_raw_strings, provider_getters_fall_back_to_defaults; clippy no new warnings."
   },
   {
     "id": 12,
@@ -149,7 +151,9 @@
     "end_line": 183,
     "title": "delete_meeting removes database rows but never deletes the meeting's audio file, leaving deleted recordings on disk indefinitely",
     "root_cause": "delete_meeting only executes DELETE FROM meetings (sqlite_manager.rs:263-266, cascading transcript/summary rows). The audio copied into ~/RecapData/inbox/<uuid>.<ext> by import_audio_file / watch-folder / phone upload is never removed — FileStore has no delete API at all. For a privacy-first product, a user deleting a meeting reasonably expects the recording to be erased; instead the most sensitive artifact (raw meeting audio) persists forever in a known location, recoverable by anyone with access to the profile directory.",
-    "suggested_fix": "In the delete path, remove meeting.audio_file_path (and any derived artifacts) from disk after the DB delete succeeds, guarding the path to the managed data directory; add a FileStore::delete_file helper and a test asserting the inbox copy is gone after delete_meeting."
+    "suggested_fix": "In the delete path, remove meeting.audio_file_path (and any derived artifacts) from disk after the DB delete succeeds, guarding the path to the managed data directory; add a FileStore::delete_file helper and a test asserting the inbox copy is gone after delete_meeting.",
+    "status": "fixed",
+    "verification_notes": "StorageManager::delete_meeting captures audio_file_path, deletes DB rows, then removes the audio file via remove_managed_audio() confined to the canonical data dir (a path outside it is never touched). Verified: cargo test -> 27 passed incl. test_delete_meeting_removes_audio_file and test_delete_meeting_does_not_touch_external_files; clippy no new warnings."
   },
   {
     "id": 13,
@@ -160,7 +164,9 @@
     "end_line": 754,
     "title": "sync_meeting_to_team_server writes back a stale Meeting snapshot after network I/O, clobbering concurrent updates (lost update)",
     "root_cause": "The command snapshots the full Meeting at line 664-675, then performs network I/O that can take up to 30s (reqwest timeout). Both the pre-sync 'Syncing' write (716-720) and the post-sync write (739-743 / 747-751) call update_meeting(&meeting) with that stale snapshot, overwriting every column. If process_meeting completes during the sync (setting status=Completed, duration_seconds, model_used) or any other update lands, the final update_meeting reverts those fields to their pre-sync values. processing.rs avoids this by re-fetching the meeting before updating; this command does not.",
-    "suggested_fix": "Only update the sync_status column (dedicated UPDATE meetings SET sync_status=? WHERE id=? statement), or re-fetch the meeting under the storage lock immediately before each write and merge only sync_status/updated_at."
+    "suggested_fix": "Only update the sync_status column (dedicated UPDATE meetings SET sync_status=? WHERE id=? statement), or re-fetch the meeting under the storage lock immediately before each write and merge only sync_status/updated_at.",
+    "status": "fixed",
+    "verification_notes": "Added SqliteManager/StorageManager::update_sync_status (updates only sync_status + updated_at). sync_meeting_to_team_server now uses it for the pre-sync, post-sync and error writes instead of update_meeting(&stale_snapshot), so a concurrent process_meeting update is no longer clobbered after network I/O. Verified: cargo test -> 27 passed incl. test_update_sync_status_only_touches_sync_status; clippy no new warnings."
   },
   {
     "id": 14,
@@ -171,7 +177,9 @@
     "end_line": 111,
     "title": "change_passphrase swaps the in-memory key without re-encrypting stored data, permanently bricking all saved API keys",
     "root_cause": "change_passphrase derives a new key and calls replace_key, with a comment admitting re-encryption is not implemented. All api_keys rows were encrypted with the old key (AES-256-GCM), so after this call every get_api_key fails authentication ('Encryption error') and there is no way to recover the keys — the old key is discarded. The method is public on StorageManager (a natural hook for a future 'change passphrase' settings UI); it currently has no callers, but any use causes irreversible loss of stored credentials.",
-    "suggested_fix": "Either implement full re-encryption (decrypt every api_keys row and encrypted file with the old key, re-encrypt with the new key in one transaction, then swap the key) or remove/disable the method until implemented so it cannot be wired up in a data-destroying state."
+    "suggested_fix": "Either implement full re-encryption (decrypt every api_keys row and encrypted file with the old key, re-encrypt with the new key in one transaction, then swap the key) or remove/disable the method until implemented so it cannot be wired up in a data-destroying state.",
+    "status": "fixed",
+    "verification_notes": "change_passphrase now returns an actionable Encryption error instead of swapping the in-memory key without re-encrypting (which irreversibly bricked saved API keys). replace_key annotated #[allow(dead_code)] and retained for the future re-encryption flow. Verified: cargo test -> 27 passed incl. test_change_passphrase_refuses_unimplemented (original key still decrypts); clippy no new warnings."
   },
   {
     "id": 15,
@@ -182,7 +190,9 @@
     "end_line": 17,
     "title": "Two independent SQLite connections to recap.db with no busy_timeout cause spurious 'database is locked' failures under concurrent writes",
     "root_cause": "main.rs:520-526 creates StorageManager (which opens its own Connection in SqliteManager::new) and then a second SqliteManager on the same recap.db for ConfigManager. The two connections are guarded by different mutexes (storage vs config), so writes can run concurrently (e.g. watch-folder import thread creating a meeting via storage while the UI persists a setting via config, or team_server_login persisting the URL while processing saves a transcript). WAL allows only one writer at a time and neither connection sets a busy_timeout (none exists anywhere in the crate), so the second writer immediately gets SQLITE_BUSY and the command fails with 'database is locked'.",
-    "suggested_fix": "Share a single SqliteManager/Connection between StorageManager and ConfigManager (e.g. Arc<Mutex<SqliteManager>> or pass the existing handle), or at minimum set conn.busy_timeout(Duration::from_secs(5)) in SqliteManager::new so concurrent writers block briefly instead of failing."
+    "suggested_fix": "Share a single SqliteManager/Connection between StorageManager and ConfigManager (e.g. Arc<Mutex<SqliteManager>> or pass the existing handle), or at minimum set conn.busy_timeout(Duration::from_secs(5)) in SqliteManager::new so concurrent writers block briefly instead of failing.",
+    "status": "fixed",
+    "verification_notes": "SqliteManager::new sets conn.busy_timeout(5s) so concurrent writers on the separate Storage/Config connections block briefly instead of failing immediately with 'database is locked'. Verified: cargo test -> 27 passed; clippy no new warnings. A deterministic concurrency regression test was not added (timing-dependent); sharing a single connection remains a larger follow-up."
   },
   {
     "id": 16,

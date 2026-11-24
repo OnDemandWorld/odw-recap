@@ -209,4 +209,75 @@ mod tests {
         let beta = templates.iter().find(|(n, _, _)| n == "beta").unwrap();
         assert!(beta.2); // is_custom
     }
+
+    // Audit #12: deleting a meeting must also erase its audio file when the file
+    // lives inside the managed data directory.
+    #[test]
+    fn test_delete_meeting_removes_audio_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        let audio_path = temp_dir.path().join("recording.m4a");
+        std::fs::write(&audio_path, b"fake audio bytes").unwrap();
+
+        let mut meeting = create_test_meeting();
+        meeting.audio_file_path = audio_path.clone();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+        assert!(audio_path.exists());
+
+        storage.delete_meeting(id).unwrap();
+        assert!(storage.get_meeting(id).unwrap().is_none());
+        assert!(!audio_path.exists(), "audio file must be removed on delete");
+    }
+
+    // Audit #12: a path outside the data dir must never be deleted.
+    #[test]
+    fn test_delete_meeting_does_not_touch_external_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        let outside = TempDir::new().unwrap();
+        let external_file = outside.path().join("keep.m4a");
+        std::fs::write(&external_file, b"do not delete").unwrap();
+
+        let mut meeting = create_test_meeting();
+        meeting.audio_file_path = external_file.clone();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+
+        storage.delete_meeting(id).unwrap();
+        assert!(external_file.exists(), "file outside data dir must be preserved");
+    }
+
+    // Audit #13: update_sync_status changes only sync_status, leaving every other
+    // column intact (no stale-snapshot clobber).
+    #[test]
+    fn test_update_sync_status_only_touches_sync_status() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+        let meeting = create_test_meeting();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+
+        storage.update_sync_status(id, &SyncStatus::Synced).unwrap();
+        let after = storage.get_meeting(id).unwrap().unwrap();
+        assert!(matches!(after.sync_status, SyncStatus::Synced));
+        assert_eq!(after.title, Some("Test Meeting".to_string()));
+        assert!(matches!(after.status, MeetingStatus::Completed));
+        assert_eq!(after.language, "en");
+        assert_eq!(after.participants.len(), 2);
+    }
+
+    // Audit #14: change_passphrase must refuse rather than brick stored keys.
+    #[test]
+    fn test_change_passphrase_refuses_unimplemented() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+        storage.save_api_key("openai", "sk-secret").unwrap();
+
+        assert!(storage.change_passphrase("a-new-passphrase").is_err());
+        // The original key must still decrypt (key was not swapped).
+        assert_eq!(storage.get_api_key("openai").unwrap(), Some("sk-secret".to_string()));
+    }
 }

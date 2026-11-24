@@ -101,16 +101,49 @@ impl ConfigManager {
     }
 
     pub fn stt_provider(&self) -> Result<String> {
-        match self.get::<String>("stt_provider")? {
+        // Audit #11: provider settings are written as raw strings by the
+        // set_config command / set_string (e.g. "openai"), so read them raw.
+        // get::<String> JSON-decodes and fails on a bare string, which broke
+        // start_watch_folder / start_http_upload_server after saving settings.
+        match self.get_string("stt_provider")? {
             Some(provider) => Ok(provider),
             None => Ok(self.defaults.stt_provider.clone()),
         }
     }
 
     pub fn llm_provider(&self) -> Result<String> {
-        match self.get::<String>("llm_provider")? {
+        match self.get_string("llm_provider")? {
             Some(provider) => Ok(provider),
             None => Ok(self.defaults.llm_provider.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Audit #11: the set_config command stores raw strings; the provider getters
+    // must read them raw (not JSON-decode), or saving settings breaks startup of
+    // the watch folder / HTTP upload server.
+    #[test]
+    fn provider_getters_read_raw_strings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = SqliteManager::new(&tmp.path().join("cfg.db")).unwrap();
+        let config = ConfigManager::new(db);
+
+        config.set_string("stt_provider", "openai").unwrap();
+        config.set_string("llm_provider", "anthropic").unwrap();
+        assert_eq!(config.stt_provider().unwrap(), "openai");
+        assert_eq!(config.llm_provider().unwrap(), "anthropic");
+    }
+
+    #[test]
+    fn provider_getters_fall_back_to_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = SqliteManager::new(&tmp.path().join("cfg.db")).unwrap();
+        let config = ConfigManager::new(db);
+        assert_eq!(config.stt_provider().unwrap(), "whisper_local");
+        assert_eq!(config.llm_provider().unwrap(), "llama_local");
     }
 }

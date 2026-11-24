@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 13 · skipped 1 · reverted 0 · open 70
+- **Remediation progress:** fixed 18 · skipped 1 · reverted 0 · open 65
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -56,7 +56,7 @@ _Bugs, security issues, and data-loss risks — fix first._
   - **Suggested fix:** Remove middleware.RealIP unless the server is actually behind a trusted reverse proxy; if a proxy is used, only honor forwarded headers from configured trusted proxy CIDRs (and have the proxy strip client-supplied copies). Key the rate limiter on the true connection peer otherwise, and record the peer address in audit entries.
   - **Verification:** Removed the unconditional r.Use(middleware.RealIP) from Router(); clientKey now keys on the authoritative connection peer (r.RemoteAddr). Updated clientKey comment. Verified: `cd team-server && go test ./...` -> ok (incl. TestRealIP_SpoofedHeadersIgnored asserting audit ip stays 192.0.2.1 despite spoofed X-Forwarded-For/X-Real-IP/True-Client-IP); go vet 0; gofmt clean.
 
-## Medium (19) — 9 fixed
+## Medium (19) — 14 fixed
 
 _Performance, error-handling, and correctness gaps — schedule soon._
 
@@ -96,30 +96,35 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Handle Modify(Name(RenameMode::To/Both)) and Modify(Data) as import candidates; dedup by canonical path; move the stability wait off the notify thread (spawn a task per candidate or use a debounce map); retry/extend the window for files still growing instead of dropping them after 15s.
   - **Verification:** Watch-folder callback now also imports Modify(Name) events (moved-in files / temp-then-rename), fixing the Create-only filter that skipped `mv` imports. Verified: cargo test -> 21 passed; clippy no new warnings. Remaining broader robustness follow-ups (not in minimal scope): the 15s stability cap abandoning slow writes and the blocking sleep on notify's delivery thread; an event-driven regression needs filesystem integration testing.
 
-- [ ] **#11** `bug` — Config values written raw by set_string/set_config break typed getters that JSON-decode, so watch-folder and HTTP-upload startup fail after saving provider settings
+- [x] **#11** `bug` — Config values written raw by set_string/set_config break typed getters that JSON-decode, so watch-folder and HTTP-upload startup fail after saving provider settings — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/config/mod.rs:54-73`
   - **Root cause:** ConfigManager has two incompatible encodings for the same keys: set_string()/the set_config Tauri command store the raw string (e.g. 'openai'), while get::<T>() runs serde_json::from_str on the stored value. The frontend (desktop-app/src/main.js persistSetting -> invoke('set_config', {key:'stt_provider', value:'openai'}')) writes raw strings. stt_provider()/llm_provider() (config/mod.rs:103-115) use get::<String>, so serde_json::from_str::<String>("openai") fails with 'expected value at line 1 column 1'. Concrete failure: user picks OpenAI/Deepgram in Settings, then start_watch_folder (main.rs:237) or start_http_upload_server (main.rs:453) calls config.stt_provider() and returns a JSON error, while create_meeting (which uses get_string) works — inconsistent behavior for the same setting.
   - **Suggested fix:** Use one encoding convention per key: either make stt_provider()/llm_provider() read via get_string() (raw) like create_meeting does, or make set_config JSON-encode strings and migrate existing raw values. Add a test that writes via set_string and reads via the typed getter.
+  - **Verification:** stt_provider()/llm_provider() now read via get_string (raw), matching how set_config/set_string write; previously get::<String> JSON-decoded a bare string like 'openai' and errored, breaking watch-folder/HTTP-upload startup. Verified: cd desktop-app/src-tauri && cargo test -> 27 passed incl. provider_getters_read_raw_strings, provider_getters_fall_back_to_defaults; clippy no new warnings.
 
-- [ ] **#12** `security` — delete_meeting removes database rows but never deletes the meeting's audio file, leaving deleted recordings on disk indefinitely
+- [x] **#12** `security` — delete_meeting removes database rows but never deletes the meeting's audio file, leaving deleted recordings on disk indefinitely — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/main.rs:179-183`
   - **Root cause:** delete_meeting only executes DELETE FROM meetings (sqlite_manager.rs:263-266, cascading transcript/summary rows). The audio copied into ~/RecapData/inbox/<uuid>.<ext> by import_audio_file / watch-folder / phone upload is never removed — FileStore has no delete API at all. For a privacy-first product, a user deleting a meeting reasonably expects the recording to be erased; instead the most sensitive artifact (raw meeting audio) persists forever in a known location, recoverable by anyone with access to the profile directory.
   - **Suggested fix:** In the delete path, remove meeting.audio_file_path (and any derived artifacts) from disk after the DB delete succeeds, guarding the path to the managed data directory; add a FileStore::delete_file helper and a test asserting the inbox copy is gone after delete_meeting.
+  - **Verification:** StorageManager::delete_meeting captures audio_file_path, deletes DB rows, then removes the audio file via remove_managed_audio() confined to the canonical data dir (a path outside it is never touched). Verified: cargo test -> 27 passed incl. test_delete_meeting_removes_audio_file and test_delete_meeting_does_not_touch_external_files; clippy no new warnings.
 
-- [ ] **#13** `concurrency` — sync_meeting_to_team_server writes back a stale Meeting snapshot after network I/O, clobbering concurrent updates (lost update)
+- [x] **#13** `concurrency` — sync_meeting_to_team_server writes back a stale Meeting snapshot after network I/O, clobbering concurrent updates (lost update) — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/main.rs:664-754`
   - **Root cause:** The command snapshots the full Meeting at line 664-675, then performs network I/O that can take up to 30s (reqwest timeout). Both the pre-sync 'Syncing' write (716-720) and the post-sync write (739-743 / 747-751) call update_meeting(&meeting) with that stale snapshot, overwriting every column. If process_meeting completes during the sync (setting status=Completed, duration_seconds, model_used) or any other update lands, the final update_meeting reverts those fields to their pre-sync values. processing.rs avoids this by re-fetching the meeting before updating; this command does not.
   - **Suggested fix:** Only update the sync_status column (dedicated UPDATE meetings SET sync_status=? WHERE id=? statement), or re-fetch the meeting under the storage lock immediately before each write and merge only sync_status/updated_at.
+  - **Verification:** Added SqliteManager/StorageManager::update_sync_status (updates only sync_status + updated_at). sync_meeting_to_team_server now uses it for the pre-sync, post-sync and error writes instead of update_meeting(&stale_snapshot), so a concurrent process_meeting update is no longer clobbered after network I/O. Verified: cargo test -> 27 passed incl. test_update_sync_status_only_touches_sync_status; clippy no new warnings.
 
-- [ ] **#14** `bug` — change_passphrase swaps the in-memory key without re-encrypting stored data, permanently bricking all saved API keys
+- [x] **#14** `bug` — change_passphrase swaps the in-memory key without re-encrypting stored data, permanently bricking all saved API keys — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/mod.rs:106-111`
   - **Root cause:** change_passphrase derives a new key and calls replace_key, with a comment admitting re-encryption is not implemented. All api_keys rows were encrypted with the old key (AES-256-GCM), so after this call every get_api_key fails authentication ('Encryption error') and there is no way to recover the keys — the old key is discarded. The method is public on StorageManager (a natural hook for a future 'change passphrase' settings UI); it currently has no callers, but any use causes irreversible loss of stored credentials.
   - **Suggested fix:** Either implement full re-encryption (decrypt every api_keys row and encrypted file with the old key, re-encrypt with the new key in one transaction, then swap the key) or remove/disable the method until implemented so it cannot be wired up in a data-destroying state.
+  - **Verification:** change_passphrase now returns an actionable Encryption error instead of swapping the in-memory key without re-encrypting (which irreversibly bricked saved API keys). replace_key annotated #[allow(dead_code)] and retained for the future re-encryption flow. Verified: cargo test -> 27 passed incl. test_change_passphrase_refuses_unimplemented (original key still decrypts); clippy no new warnings.
 
-- [ ] **#15** `concurrency` — Two independent SQLite connections to recap.db with no busy_timeout cause spurious 'database is locked' failures under concurrent writes
+- [x] **#15** `concurrency` — Two independent SQLite connections to recap.db with no busy_timeout cause spurious 'database is locked' failures under concurrent writes — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/sqlite_manager.rs:12-17`
   - **Root cause:** main.rs:520-526 creates StorageManager (which opens its own Connection in SqliteManager::new) and then a second SqliteManager on the same recap.db for ConfigManager. The two connections are guarded by different mutexes (storage vs config), so writes can run concurrently (e.g. watch-folder import thread creating a meeting via storage while the UI persists a setting via config, or team_server_login persisting the URL while processing saves a transcript). WAL allows only one writer at a time and neither connection sets a busy_timeout (none exists anywhere in the crate), so the second writer immediately gets SQLITE_BUSY and the command fails with 'database is locked'.
   - **Suggested fix:** Share a single SqliteManager/Connection between StorageManager and ConfigManager (e.g. Arc<Mutex<SqliteManager>> or pass the existing handle), or at minimum set conn.busy_timeout(Duration::from_secs(5)) in SqliteManager::new so concurrent writers block briefly instead of failing.
+  - **Verification:** SqliteManager::new sets conn.busy_timeout(5s) so concurrent writers on the separate Storage/Config connections block briefly instead of failing immediately with 'database is locked'. Verified: cargo test -> 27 passed; clippy no new warnings. A deterministic concurrency regression test was not added (timing-dependent); sharing a single connection remains a larger follow-up.
 
 - [ ] **#16** `bug` — Ollama provider requests structured JSON but discards it: summary is raw JSON prose, action_items/decisions/key_points hard-coded empty
   - **Location:** `desktop-app/src-tauri/src/summarization/providers/ollama.rs:60-105`
