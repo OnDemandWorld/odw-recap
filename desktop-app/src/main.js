@@ -79,7 +79,7 @@
           meetingListEl.innerHTML = hits
             .map(
               (h) =>
-                `<div class="meeting-card" data-id="${escapeHtml(h.meeting_id)}" style="cursor:pointer">` +
+                `<div class="meeting-card" data-id="${escapeHtml(h.meeting_id)}">` +
                 `<div class="snippet">…${escapeHtml(h.snippet)}…</div></div>`
             )
             .join("");

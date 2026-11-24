@@ -611,3 +611,17 @@ textarea:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Audit #69: moved out of inline style="" attributes, which the CSP
+   (style-src 'self', no 'unsafe-inline') blocks in the packaged app. */
+.transcript-search {
+  flex: 1;
+  max-width: 320px;
+  padding: .4rem .6rem;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 6px;
+}
+
+.meeting-card {
+  cursor: pointer;
+}

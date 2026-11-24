@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 37 · skipped 4 · reverted 0 · open 43
+- **Remediation progress:** fixed 41 · skipped 4 · reverted 0 · open 39
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,14 +174,15 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 16 fixed
+## Low (61) — 20 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
-- [ ] **#24** `security` — All GitHub Actions pinned to mutable tags/branches instead of commit SHAs
+- [x] **#24** `security` — All GitHub Actions pinned to mutable tags/branches instead of commit SHAs — **FIXED**
   - **Location:** `.github/workflows/ci.yml:14-77`
   - **Root cause:** actions/checkout@v4, actions/setup-go@v5, actions/setup-node@v4 and Swatinem/rust-cache@v2 are mutable major-version tags, and dtolnay/rust-toolchain@stable is a moving branch. Anyone who compromises the action repo (or a maintainer tag force-push) can change the code that runs in this workflow with the GITHUB_TOKEN and write access to the checkout, without any diff appearing in this repository. No github.event context is interpolated into run: blocks and no secrets are used, so there is no injection/exposure issue today — this is purely supply-chain hardening.
   - **Suggested fix:** Pin every action to a full commit SHA with a trailing version comment (e.g. actions/checkout@<sha> # v4.x.x) and let Dependabot/Renovate propose SHA bumps. For dtolnay/rust-toolchain, pin a SHA and pass toolchain: stable as an input instead of using the @stable branch.
+  - **Verification:** Pinned every GitHub Action to a full commit SHA with a trailing version comment (checkout v4, setup-go v5, setup-node v4, rust-cache v2, rust-toolchain stable); the pinned rust-toolchain action now passes 'toolchain: stable' explicitly. SHAs resolved via gh api repos/<owner>/<repo>/commits/<tag>. Verified: grep ci.yml 'uses:' shows 40-char SHAs; YAML structure intact.
 
 - [x] **#25** `maintainability` — Go toolchain drift: CI tests on Go 1.21 while the release Docker image builds with Go 1.23 — **FIXED**
   - **Location:** `.github/workflows/ci.yml:36-38`
@@ -201,15 +202,17 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Replace 'npm install' with 'npm ci' in CI (and in scripts/build-all.sh / package.sh for reproducibility). npm ci fails fast if the lockfile is out of sync with package.json instead of silently rewriting it.
   - **Verification:** CI build-desktop and scripts/build-all.sh + scripts/package.sh now use 'npm ci' (reproducible from the committed lockfile, fails fast on drift) instead of 'npm install'. Verified: grep ci.yml npm ci; bash -n on all three scripts OK.
 
-- [ ] **#28** `maintainability` — @tauri-apps/api is a declared runtime dependency but is never used
+- [x] **#28** `maintainability` — @tauri-apps/api is a declared runtime dependency but is never used — **FIXED**
   - **Location:** `desktop-app/package.json:17-19`
   - **Root cause:** The frontend is bundler-free and accesses the backend exclusively through the injected window.__TAURI__ global (main.js:1-22); no file imports '@tauri-apps/api' (grep confirms), and tests/commands.test.js:77-79 explicitly forbids bare '@tauri-apps/' imports. The dependency in 'dependencies' is dead weight that misleads contributors into thinking module imports are the supported pattern, and it is shipped into node_modules for no purpose.
   - **Suggested fix:** Remove '@tauri-apps/api' from dependencies (the CLI in devDependencies is all that is needed). If it is ever wanted for typed tests, move it to devDependencies with a comment explaining the window.__TAURI__ runtime contract.
+  - **Verification:** Removed the unused @tauri-apps/api runtime dependency (the bundler-free frontend uses window.__TAURI__; grep src shows no import). npm uninstall updated package.json + package-lock.json; @tauri-apps/cli remains in devDependencies. Verified: cd desktop-app && npm test -> 25 passed.
 
-- [ ] **#29** `maintainability` — Duplicate home-directory crates: 'directories' declared but never used, only 'dirs' is used
+- [x] **#29** `maintainability` — Duplicate home-directory crates: 'directories' declared but never used, only 'dirs' is used — **FIXED**
   - **Location:** `desktop-app/src-tauri/Cargo.toml:25-26`
   - **Root cause:** Both 'directories = "5.0"' (line 25) and 'dirs = "5.0"' (line 26) are declared. grep across src-tauri/src shows only dirs::home_dir() calls (main.rs:501, config/mod.rs:27) and zero 'directories::' usages. The unused crate adds compile time and an ambiguous choice for future contributors.
   - **Suggested fix:** Remove the 'directories' dependency and keep 'dirs' (or consolidate on one crate deliberately).
+  - **Verification:** Removed the unused 'directories' crate from Cargo.toml (only dirs::home_dir is used); Cargo.lock regenerated and no longer contains directories. Verified: cd desktop-app/src-tauri && cargo test -> 28 passed; grep Cargo.lock 'name = "directories"' -> 0.
 
 - [ ] **#30** `bug` — Documented capture stubs fabricate success: stop_recording returns a path to a file that was never written
   - **Location:** `desktop-app/src-tauri/src/audio_capture/recorder.rs:40-91`
@@ -406,10 +409,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** STTRouter::transcribe selects the provider via config.model (line 42), and LLMRouter::summarize does the identical thing (llm_router.rs line 41). But OpenAIWhisperProvider sends config.model as the OpenAI API model (openai_whisper.rs line 96) and OpenAIProvider/AnthropicProvider/OllamaProvider send it as their API model id. The two semantics are mutually exclusive: setting model='whisper-1' fails routing ('Provider not found'), while setting model='openai_whisper' to route sends an invalid model to the API. Today processing.rs leaves model=None so the contradiction is latent, and config.llm_model ('llama-3-8b-instruct') is never plumbed into SummarizationConfig at all — users cannot actually choose a model.
   - **Suggested fix:** Add an explicit provider field (or route by meeting.stt_provider/llm_provider as processing.rs does) and reserve config.model for the engine model id; plumb config.llm_model through processing.rs into SummarizationConfig.model.
 
-- [ ] **#69** `bug` — Inline style attributes are blocked by the configured CSP (style-src 'self' without 'unsafe-inline')
+- [x] **#69** `bug` — Inline style attributes are blocked by the configured CSP (style-src 'self' without 'unsafe-inline') — **FIXED**
   - **Location:** `desktop-app/src/index.html:37-42`
   - **Root cause:** tauri.conf.json:38 sets style-src 'self' with no 'unsafe-inline'. Tauri v1 only appends nonces/hashes for its own injected scripts/styles (verified in tauri-1.8.3 src/manager.rs replace_csp_nonce); it does not relax the policy for app markup. CSP style-src without 'unsafe-inline' blocks style="" attributes, so the search input's inline layout (index.html:41: flex:1;max-width:320px;padding;border;border-radius) and the search-result cards' style="cursor:pointer" (main.js:82) are silently dropped in the packaged app: the search box loses its intended sizing and hit cards give no pointer affordance. Note tests/commands.test.js:101 explicitly forbids adding 'unsafe-inline' to the CSP, so the markup is what must change.
   - **Suggested fix:** Move both inline styles into styles.css classes (e.g. .transcript-search { flex:1; max-width:320px; ... } and .meeting-card { cursor:pointer }) and reference the classes from index.html and the main.js search-result template. Keep the CSP unchanged.
+  - **Verification:** Moved the CSP-blocked inline styles into styles.css classes: the search input now uses class='transcript-search' and search-result cards get cursor:pointer from .meeting-card; removed the style= attributes from index.html and main.js. CSP left unchanged (style-src 'self', no unsafe-inline). Verified: npm test -> 25 passed (commands.test.js CSP assertion still green).
 
 - [x] **#70** `bug` — build-all.sh hardcodes ~/.cargo/bin/cargo, assumes repo-root CWD, and lacks set -u / pipefail — **FIXED**
   - **Location:** `scripts/build-all.sh:2-9`

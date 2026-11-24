@@ -307,7 +307,9 @@
     "end_line": 77,
     "title": "All GitHub Actions pinned to mutable tags/branches instead of commit SHAs",
     "root_cause": "actions/checkout@v4, actions/setup-go@v5, actions/setup-node@v4 and Swatinem/rust-cache@v2 are mutable major-version tags, and dtolnay/rust-toolchain@stable is a moving branch. Anyone who compromises the action repo (or a maintainer tag force-push) can change the code that runs in this workflow with the GITHUB_TOKEN and write access to the checkout, without any diff appearing in this repository. No github.event context is interpolated into run: blocks and no secrets are used, so there is no injection/exposure issue today — this is purely supply-chain hardening.",
-    "suggested_fix": "Pin every action to a full commit SHA with a trailing version comment (e.g. actions/checkout@<sha> # v4.x.x) and let Dependabot/Renovate propose SHA bumps. For dtolnay/rust-toolchain, pin a SHA and pass toolchain: stable as an input instead of using the @stable branch."
+    "suggested_fix": "Pin every action to a full commit SHA with a trailing version comment (e.g. actions/checkout@<sha> # v4.x.x) and let Dependabot/Renovate propose SHA bumps. For dtolnay/rust-toolchain, pin a SHA and pass toolchain: stable as an input instead of using the @stable branch.",
+    "status": "fixed",
+    "verification_notes": "Pinned every GitHub Action to a full commit SHA with a trailing version comment (checkout v4, setup-go v5, setup-node v4, rust-cache v2, rust-toolchain stable); the pinned rust-toolchain action now passes 'toolchain: stable' explicitly. SHAs resolved via gh api repos/<owner>/<repo>/commits/<tag>. Verified: grep ci.yml 'uses:' shows 40-char SHAs; YAML structure intact."
   },
   {
     "id": 25,
@@ -357,7 +359,9 @@
     "end_line": 19,
     "title": "@tauri-apps/api is a declared runtime dependency but is never used",
     "root_cause": "The frontend is bundler-free and accesses the backend exclusively through the injected window.__TAURI__ global (main.js:1-22); no file imports '@tauri-apps/api' (grep confirms), and tests/commands.test.js:77-79 explicitly forbids bare '@tauri-apps/' imports. The dependency in 'dependencies' is dead weight that misleads contributors into thinking module imports are the supported pattern, and it is shipped into node_modules for no purpose.",
-    "suggested_fix": "Remove '@tauri-apps/api' from dependencies (the CLI in devDependencies is all that is needed). If it is ever wanted for typed tests, move it to devDependencies with a comment explaining the window.__TAURI__ runtime contract."
+    "suggested_fix": "Remove '@tauri-apps/api' from dependencies (the CLI in devDependencies is all that is needed). If it is ever wanted for typed tests, move it to devDependencies with a comment explaining the window.__TAURI__ runtime contract.",
+    "status": "fixed",
+    "verification_notes": "Removed the unused @tauri-apps/api runtime dependency (the bundler-free frontend uses window.__TAURI__; grep src shows no import). npm uninstall updated package.json + package-lock.json; @tauri-apps/cli remains in devDependencies. Verified: cd desktop-app && npm test -> 25 passed."
   },
   {
     "id": 29,
@@ -368,7 +372,9 @@
     "end_line": 26,
     "title": "Duplicate home-directory crates: 'directories' declared but never used, only 'dirs' is used",
     "root_cause": "Both 'directories = \"5.0\"' (line 25) and 'dirs = \"5.0\"' (line 26) are declared. grep across src-tauri/src shows only dirs::home_dir() calls (main.rs:501, config/mod.rs:27) and zero 'directories::' usages. The unused crate adds compile time and an ambiguous choice for future contributors.",
-    "suggested_fix": "Remove the 'directories' dependency and keep 'dirs' (or consolidate on one crate deliberately)."
+    "suggested_fix": "Remove the 'directories' dependency and keep 'dirs' (or consolidate on one crate deliberately).",
+    "status": "fixed",
+    "verification_notes": "Removed the unused 'directories' crate from Cargo.toml (only dirs::home_dir is used); Cargo.lock regenerated and no longer contains directories. Verified: cd desktop-app/src-tauri && cargo test -> 28 passed; grep Cargo.lock 'name = \"directories\"' -> 0."
   },
   {
     "id": 30,
@@ -808,7 +814,9 @@
     "end_line": 42,
     "title": "Inline style attributes are blocked by the configured CSP (style-src 'self' without 'unsafe-inline')",
     "root_cause": "tauri.conf.json:38 sets style-src 'self' with no 'unsafe-inline'. Tauri v1 only appends nonces/hashes for its own injected scripts/styles (verified in tauri-1.8.3 src/manager.rs replace_csp_nonce); it does not relax the policy for app markup. CSP style-src without 'unsafe-inline' blocks style=\"\" attributes, so the search input's inline layout (index.html:41: flex:1;max-width:320px;padding;border;border-radius) and the search-result cards' style=\"cursor:pointer\" (main.js:82) are silently dropped in the packaged app: the search box loses its intended sizing and hit cards give no pointer affordance. Note tests/commands.test.js:101 explicitly forbids adding 'unsafe-inline' to the CSP, so the markup is what must change.",
-    "suggested_fix": "Move both inline styles into styles.css classes (e.g. .transcript-search { flex:1; max-width:320px; ... } and .meeting-card { cursor:pointer }) and reference the classes from index.html and the main.js search-result template. Keep the CSP unchanged."
+    "suggested_fix": "Move both inline styles into styles.css classes (e.g. .transcript-search { flex:1; max-width:320px; ... } and .meeting-card { cursor:pointer }) and reference the classes from index.html and the main.js search-result template. Keep the CSP unchanged.",
+    "status": "fixed",
+    "verification_notes": "Moved the CSP-blocked inline styles into styles.css classes: the search input now uses class='transcript-search' and search-result cards get cursor:pointer from .meeting-card; removed the style= attributes from index.html and main.js. CSP left unchanged (style-src 'self', no unsafe-inline). Verified: npm test -> 25 passed (commands.test.js CSP assertion still green)."
   },
   {
     "id": 70,
