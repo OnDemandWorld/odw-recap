@@ -192,7 +192,7 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Find user
 	var user models.User
 	var passwordHash string
-	err := s.db.DB().QueryRow(
+	err := s.db.DB().QueryRowContext(r.Context(),
 		"SELECT id, email, password_hash, name, role, created_at, updated_at FROM users WHERE email = $1",
 		req.Email,
 	).Scan(&user.ID, &user.Email, &passwordHash, &user.Name, &user.Role, &user.CreatedAt, &user.UpdatedAt)

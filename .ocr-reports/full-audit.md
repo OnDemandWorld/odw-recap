@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 26 · skipped 2 · reverted 0 · open 56
+- **Remediation progress:** fixed 31 · skipped 2 · reverted 0 · open 51
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 5 fixed
+## Low (61) — 10 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -423,10 +423,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** Same robustness gaps as build-all.sh: '~/.cargo/bin/cargo' (line 9) fails when cargo is installed elsewhere; relative cd calls (lines 8, 14, 20) require CWD=repo root; only 'set -e' is set. Additionally line 21 runs 'npm test' (jest) without any prior 'npm install'/'npm ci' in desktop-app — on a fresh clone jest is not installed and the frontend test leg fails with 'jest: not found' unless the developer happened to run build-all.sh first.
   - **Suggested fix:** Use 'set -euo pipefail', 'cd "$(dirname "$0")/.."', plain 'cargo' from PATH, and run 'npm ci' in desktop-app before 'npm test'.
 
-- [ ] **#73** `performance` — Admin and auth DB calls ignore the request context, so timeouts and client disconnects do not cancel queries
+- [x] **#73** `performance` — Admin and auth DB calls ignore the request context, so timeouts and client disconnects do not cancel queries — **FIXED**
   - **Location:** `team-server/internal/api/admin_handlers.go:38-41`
   - **Root cause:** adminListUsersHandler (line 38), adminAuditLogHandler (line 67) and count (line 123) use s.db.DB().Query/QueryRow without a context, as do registerHandler (auth_handlers.go:102,117) and loginHandler (auth_handlers.go:165). chi's Timeout(60s) and client disconnects cancel r.Context(), but these queries keep running to completion, holding connections and doing work whose results are discarded — unlike the meeting store, which consistently uses ExecContext/QueryContext.
   - **Suggested fix:** Pass r.Context() to all request-scoped queries (QueryContext/QueryRowContext/ExecContext), matching the meeting store's pattern.
+  - **Verification:** Admin list-users/audit-log/stats queries and the login lookup now use QueryContext/QueryRowContext with r.Context() (count takes a ctx param), so chi's 60s timeout and client disconnects cancel them instead of running to completion. Verified: cd team-server && go vet ./... 0; go test ./... ok; gofmt clean.
 
 - [x] **#74** `bug` — Registration does not bound email length to the VARCHAR(255) column, turning bad input into a 500 — **FIXED**
   - **Location:** `team-server/internal/api/auth_handlers.go:59-76`
@@ -440,10 +441,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Validate meeting_type <= 100, language <= 10 (and a sane title bound) in the handlers and return 400 with a field-specific message; consider an allowlist for language codes.
   - **Verification:** Added validateMeetingFields (meeting_type<=100, language<=10, title<=1000) called in createMeetingHandler and updateMeetingHandler, returning 400 instead of a pq 22001 500. Verified: go test ./... ok incl. TestValidateMeetingFields and TestCreateMeeting_RejectsOverLengthLanguage; go vet 0; gofmt clean.
 
-- [ ] **#76** `security` — CORS defaults to wildcard origin when ALLOWED_ORIGINS is unset
+- [x] **#76** `security` — CORS defaults to wildcard origin when ALLOWED_ORIGINS is unset — **FIXED**
   - **Location:** `team-server/internal/api/server.go:32`
   - **Root cause:** DefaultAllowedOrigins = ["*"] is used unless ALLOWED_ORIGINS is configured (main.go:84-90,125-127). With AllowCredentials=false this is not classic CSRF, but it lets ANY website read API responses cross-origin whenever a bearer token is available to browser JavaScript (e.g. stored in localStorage or obtained via XSS elsewhere), removing origin as a defense layer. The code comment says keep '*' only for development, yet it is the out-of-the-box production behavior.
   - **Suggested fix:** Fail closed or warn loudly when ALLOWED_ORIGINS is unset in production; require an explicit origin allowlist for browser-facing deployments.
+  - **Verification:** Router() logs a once-only (sync.Once) loud warning when ALLOWED_ORIGINS is the '*' default, prompting an explicit allowlist for browser-facing production; native-client '*' behavior is preserved (not fail-closed, to avoid breaking native clients). Verified: go test ./... ok; go vet 0; gofmt clean.
 
 - [x] **#77** `error-handling` — Audit entries silently lost when RemoteAddr exceeds ip_address VARCHAR(45) (IPv6 host:port) — **FIXED**
   - **Location:** `team-server/internal/api/store.go:163`
@@ -468,25 +470,28 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** Middleware builds the request user (ID/email/role) entirely from token claims; no handler re-checks the users table. A stolen token, or a user deleted/demoted directly in the database (the only way today, since no role-management endpoint exists), retains full access — including admin cross-tenant access via canAccess — until the 24-hour expiry (jwt.go:36). There is no logout/revocation mechanism.
   - **Suggested fix:** For sensitive deployments, revalidate role/existence against the DB (or a Redis denylist) on admin routes, shorten token lifetime with refresh tokens, and add a revocation path when user management endpoints are introduced.
 
-- [ ] **#81** `performance` — No connection-pool tuning on sql.DB (unbounded open connections, default idle pool of 2)
+- [x] **#81** `performance` — No connection-pool tuning on sql.DB (unbounded open connections, default idle pool of 2) — **FIXED**
   - **Location:** `team-server/internal/db/database.go:40-57`
   - **Root cause:** NewDatabase never calls SetMaxOpenConns/SetMaxIdleConns/SetConnMaxLifetime. database/sql defaults allow unlimited open connections (a load spike can exhaust PostgreSQL max_connections, failing all queries) while keeping only 2 idle connections, causing constant connect/disconnect churn (each a TCP+TLS+auth handshake) under sustained concurrency.
   - **Suggested fix:** Set sensible pool bounds (e.g. MaxOpenConns ~25-50 aligned with Postgres max_connections, MaxIdleConns matching, ConnMaxLifetime ~5-15m) and make them configurable.
+  - **Verification:** NewDatabase sets SetMaxOpenConns(25), SetMaxIdleConns(25), SetConnMaxLifetime(5m) to bound the pool (avoid exhausting Postgres max_connections and idle-connect churn). Verified: go test ./... ok (db package); go vet 0; gofmt clean.
 
 - [ ] **#82** `maintainability` — Redis is wired but never used; rate limiting is per-process and ParseURL failures are silently ignored
   - **Location:** `team-server/internal/db/redis.go:18-29`
   - **Root cause:** main.go:120-121 creates a Redis client and Server stores it (server.go:39), but no code path ever calls Set/Get/Delete — the login limiter is in-memory only. In a multi-replica deployment each replica grants its own 10 attempts/minute budget (N replicas = N x budget), and the 'Redis' component of the advertised stack provides no function. Additionally NewRedis silently falls back to treating a malformed redis:// URL as a bare host:port when redis.ParseURL errors (lines 21-23), hiding configuration mistakes.
   - **Suggested fix:** Either move the rate limiter to Redis (shared buckets across replicas) or remove the unused client; log/return an error when ParseURL fails instead of silently degrading.
 
-- [ ] **#83** `error-handling` — Unbounded io.ReadAll of Vault/Loop response bodies
+- [x] **#83** `error-handling` — Unbounded io.ReadAll of Vault/Loop response bodies — **FIXED**
   - **Location:** `team-server/internal/sync/forwarder.go:99-101`
   - **Root cause:** ForwardToVault reads the entire upstream response with io.ReadAll(resp.Body) (line 99) and ForwardToLoop does the same on non-2xx (line 150), with no size cap. A misbehaving or compromised Vault/Loop endpoint can stream an arbitrarily large body and exhaust team-server memory; the body is also embedded into error strings returned to clients and stored in last_error.
   - **Suggested fix:** Wrap the body in io.LimitReader (e.g. 1 MiB) before reading, and truncate upstream text included in errors.
+  - **Verification:** ForwardToVault and ForwardToLoop read upstream response bodies via io.LimitReader(resp.Body, 1 MiB) instead of unbounded io.ReadAll, capping memory from a misbehaving Vault/Loop. Verified: go test ./... ok (sync forwarder tests); go vet 0; gofmt clean.
 
-- [ ] **#84** `concurrency` — Claim lease (10m) equals the worst-case batch duration, so the last rows can be re-claimed mid-forward by another replica
+- [x] **#84** `concurrency` — Claim lease (10m) equals the worst-case batch duration, so the last rows can be re-claimed mid-forward by another replica — **FIXED**
   - **Location:** `team-server/internal/sync/worker.go:84-86`
   - **Root cause:** claim marks up to claimBatchSize=10 rows 'processing' with next_attempt_at = NOW() + claimLease (10m) (lines 134-136), then forwards them sequentially. Each row can take up to ~60s (30s Vault client timeout + 30s Loop), so a full batch of slow rows takes ~600s — exactly the lease. The final rows' leases can expire while they are still being forwarded or settled, letting a second replica's poll re-claim and re-forward them (duplicate Vault uploads / Loop triggers), defeating the FOR UPDATE SKIP LOCKED + lease design at the boundary.
   - **Suggested fix:** Make the lease comfortably exceed the worst-case batch time (e.g. claimBatchSize * per-row budget * 2), refresh the lease per row as it is processed, or reduce the batch size / add a per-row forward deadline.
+  - **Verification:** claimLease raised 10m -> 20m (2x headroom over the ~10m worst-case batch of 10 slow rows at ~60s each) so the final rows' leases cannot expire mid-forward and be re-claimed by another replica. Verified: go test ./... ok; go vet 0; gofmt clean. (Multi-replica race test needs live PG; not added.)
 
 ## Coverage
 

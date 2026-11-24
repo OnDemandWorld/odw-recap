@@ -91,7 +91,10 @@ func (w *QueueWorker) processOnce(ctx context.Context) {
 
 // claimLease bounds how long a claimed row stays invisible to other replicas
 // before its lease expires and it becomes re-claimable (crashed worker safety).
-const claimLease = 10 * time.Minute
+// Audit #84: a full batch of claimBatchSize=10 slow rows (~60s each: 30s Vault +
+// 30s Loop) takes ~10m, so the old 10m lease let the last rows be re-claimed
+// mid-forward by another replica. 20m gives 2x headroom over the worst case.
+const claimLease = 20 * time.Minute
 
 func (w *QueueWorker) claim(ctx context.Context) ([]queueRow, error) {
 	tx, err := w.db.BeginTx(ctx, nil)

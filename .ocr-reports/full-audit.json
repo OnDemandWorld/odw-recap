@@ -846,7 +846,9 @@
     "end_line": 41,
     "title": "Admin and auth DB calls ignore the request context, so timeouts and client disconnects do not cancel queries",
     "root_cause": "adminListUsersHandler (line 38), adminAuditLogHandler (line 67) and count (line 123) use s.db.DB().Query/QueryRow without a context, as do registerHandler (auth_handlers.go:102,117) and loginHandler (auth_handlers.go:165). chi's Timeout(60s) and client disconnects cancel r.Context(), but these queries keep running to completion, holding connections and doing work whose results are discarded — unlike the meeting store, which consistently uses ExecContext/QueryContext.",
-    "suggested_fix": "Pass r.Context() to all request-scoped queries (QueryContext/QueryRowContext/ExecContext), matching the meeting store's pattern."
+    "suggested_fix": "Pass r.Context() to all request-scoped queries (QueryContext/QueryRowContext/ExecContext), matching the meeting store's pattern.",
+    "status": "fixed",
+    "verification_notes": "Admin list-users/audit-log/stats queries and the login lookup now use QueryContext/QueryRowContext with r.Context() (count takes a ctx param), so chi's 60s timeout and client disconnects cancel them instead of running to completion. Verified: cd team-server && go vet ./... 0; go test ./... ok; gofmt clean."
   },
   {
     "id": 74,
@@ -883,7 +885,9 @@
     "end_line": 32,
     "title": "CORS defaults to wildcard origin when ALLOWED_ORIGINS is unset",
     "root_cause": "DefaultAllowedOrigins = [\"*\"] is used unless ALLOWED_ORIGINS is configured (main.go:84-90,125-127). With AllowCredentials=false this is not classic CSRF, but it lets ANY website read API responses cross-origin whenever a bearer token is available to browser JavaScript (e.g. stored in localStorage or obtained via XSS elsewhere), removing origin as a defense layer. The code comment says keep '*' only for development, yet it is the out-of-the-box production behavior.",
-    "suggested_fix": "Fail closed or warn loudly when ALLOWED_ORIGINS is unset in production; require an explicit origin allowlist for browser-facing deployments."
+    "suggested_fix": "Fail closed or warn loudly when ALLOWED_ORIGINS is unset in production; require an explicit origin allowlist for browser-facing deployments.",
+    "status": "fixed",
+    "verification_notes": "Router() logs a once-only (sync.Once) loud warning when ALLOWED_ORIGINS is the '*' default, prompting an explicit allowlist for browser-facing production; native-client '*' behavior is preserved (not fail-closed, to avoid breaking native clients). Verified: go test ./... ok; go vet 0; gofmt clean."
   },
   {
     "id": 77,
@@ -944,7 +948,9 @@
     "end_line": 57,
     "title": "No connection-pool tuning on sql.DB (unbounded open connections, default idle pool of 2)",
     "root_cause": "NewDatabase never calls SetMaxOpenConns/SetMaxIdleConns/SetConnMaxLifetime. database/sql defaults allow unlimited open connections (a load spike can exhaust PostgreSQL max_connections, failing all queries) while keeping only 2 idle connections, causing constant connect/disconnect churn (each a TCP+TLS+auth handshake) under sustained concurrency.",
-    "suggested_fix": "Set sensible pool bounds (e.g. MaxOpenConns ~25-50 aligned with Postgres max_connections, MaxIdleConns matching, ConnMaxLifetime ~5-15m) and make them configurable."
+    "suggested_fix": "Set sensible pool bounds (e.g. MaxOpenConns ~25-50 aligned with Postgres max_connections, MaxIdleConns matching, ConnMaxLifetime ~5-15m) and make them configurable.",
+    "status": "fixed",
+    "verification_notes": "NewDatabase sets SetMaxOpenConns(25), SetMaxIdleConns(25), SetConnMaxLifetime(5m) to bound the pool (avoid exhausting Postgres max_connections and idle-connect churn). Verified: go test ./... ok (db package); go vet 0; gofmt clean."
   },
   {
     "id": 82,
@@ -966,7 +972,9 @@
     "end_line": 101,
     "title": "Unbounded io.ReadAll of Vault/Loop response bodies",
     "root_cause": "ForwardToVault reads the entire upstream response with io.ReadAll(resp.Body) (line 99) and ForwardToLoop does the same on non-2xx (line 150), with no size cap. A misbehaving or compromised Vault/Loop endpoint can stream an arbitrarily large body and exhaust team-server memory; the body is also embedded into error strings returned to clients and stored in last_error.",
-    "suggested_fix": "Wrap the body in io.LimitReader (e.g. 1 MiB) before reading, and truncate upstream text included in errors."
+    "suggested_fix": "Wrap the body in io.LimitReader (e.g. 1 MiB) before reading, and truncate upstream text included in errors.",
+    "status": "fixed",
+    "verification_notes": "ForwardToVault and ForwardToLoop read upstream response bodies via io.LimitReader(resp.Body, 1 MiB) instead of unbounded io.ReadAll, capping memory from a misbehaving Vault/Loop. Verified: go test ./... ok (sync forwarder tests); go vet 0; gofmt clean."
   },
   {
     "id": 84,
@@ -977,6 +985,8 @@
     "end_line": 86,
     "title": "Claim lease (10m) equals the worst-case batch duration, so the last rows can be re-claimed mid-forward by another replica",
     "root_cause": "claim marks up to claimBatchSize=10 rows 'processing' with next_attempt_at = NOW() + claimLease (10m) (lines 134-136), then forwards them sequentially. Each row can take up to ~60s (30s Vault client timeout + 30s Loop), so a full batch of slow rows takes ~600s — exactly the lease. The final rows' leases can expire while they are still being forwarded or settled, letting a second replica's poll re-claim and re-forward them (duplicate Vault uploads / Loop triggers), defeating the FOR UPDATE SKIP LOCKED + lease design at the boundary.",
-    "suggested_fix": "Make the lease comfortably exceed the worst-case batch time (e.g. claimBatchSize * per-row budget * 2), refresh the lease per row as it is processed, or reduce the batch size / add a per-row forward deadline."
+    "suggested_fix": "Make the lease comfortably exceed the worst-case batch time (e.g. claimBatchSize * per-row budget * 2), refresh the lease per row as it is processed, or reduce the batch size / add a per-row forward deadline.",
+    "status": "fixed",
+    "verification_notes": "claimLease raised 10m -> 20m (2x headroom over the ~10m worst-case batch of 10 slow rows at ~60s each) so the final rows' leases cannot expire mid-forward and be re-claimed by another replica. Verified: go test ./... ok; go vet 0; gofmt clean. (Multi-replica race test needs live PG; not added.)"
   }
 ]
