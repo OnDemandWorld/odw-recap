@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 57 · skipped 5 · reverted 0 · open 22
+- **Remediation progress:** fixed 62 · skipped 6 · reverted 0 · open 16
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 36 fixed
+## Low (61) — 41 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -274,25 +274,29 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Root cause:** The comment says 'Persist everything in one critical section', but the mutex only serializes access: save_transcript_segments, save_summary, save_action_items and save_decisions each commit their own unchecked_transaction. If save_decisions (or the meeting update) fails, the transcript/summary/items are already committed while process_meeting marks the meeting Failed — the UI then shows a failed meeting that nonetheless has a transcript and summary, and summaries accumulate a new row on every reprocess.
   - **Suggested fix:** Wrap the whole persist block in a single transaction (add a StorageManager method that takes all four payloads and commits once), so partial results are impossible.
 
-- [ ] **#42** `bug` — get_template re-extracts variables, discarding stored defaults and fabricating metadata
+- [ ] **#42** `bug` — get_template re-extracts variables, discarding stored defaults and fabricating metadata — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/prompt_manager/mod.rs:28-39`
   - **Root cause:** get_template rebuilds PromptTemplate from storage content via extract_variables, which marks every variable required=true with default_value=None. The defaults declared in initialize_default_templates (e.g. max_length default '500', lines 81-87) are therefore lost on read: validate_variables on a freshly-loaded default template reports max_length as missing even though a default was defined. id is hardcoded 0 and created_at/updated_at are set to 'now' on every read, fabricating metadata. save_template (line 47) also drops description and meeting_type (passes None), so the meeting_type association the schema supports is never persisted through this API.
   - **Suggested fix:** Persist and reload the full variable definitions (name/description/default/required) and template metadata instead of re-deriving them; pass template.meeting_type/description through save_prompt_template.
+  - **Verification:** Skipped (schema migration beyond minimal scope): the prompt_templates storage schema persists only content/name/meeting_type/is_custom, not variable definitions or defaults, so get_template cannot reload stored defaults (e.g. max_length=500) without a schema change; it also fabricates id/created_at/updated_at. Recommended follow-up: persist full variable definitions (name/description/default/required) and template metadata, and pass meeting_type/description through save_prompt_template.
 
-- [ ] **#43** `maintainability` — list_templates silently returns an empty vec although StorageManager::list_prompt_templates exists
+- [x] **#43** `maintainability` — list_templates silently returns an empty vec although StorageManager::list_prompt_templates exists — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/prompt_manager/mod.rs:51-58`
   - **Root cause:** The method comments 'would need a list_prompt_templates method in StorageManager' and returns Ok(Vec::new()), but that method already exists and is used by main.rs list_prompt_templates (main.rs line 335). Any caller of PromptManager::list_templates gets a silently wrong empty result instead of an error or the real data. The whole PromptManager struct is currently dead code (never constructed outside its module), which masks the stub behavior.
   - **Suggested fix:** Implement list_templates via storage.list_prompt_templates() (mapping rows to PromptTemplate), or remove the dead PromptManager API surface in favor of the storage-backed commands until it is wired into the pipeline.
+  - **Verification:** list_templates implemented via StorageManager::list_prompt_templates + get_template (previously a stub returning an empty vec despite the storage method existing). Verified: cargo test -> 34 passed; clippy no new warnings.
 
-- [ ] **#44** `bug` — render_template never validates required variables; missing values pass through as literal {{placeholders}}
+- [x] **#44** `bug` — render_template never validates required variables; missing values pass through as literal {{placeholders}} — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/prompt_manager/mod.rs:61-71`
   - **Root cause:** render_template calls substitute_variables directly without PromptTemplate::validate_variables (template.rs lines 77-98). substitute_variables deliberately keeps unknown placeholders as '{{name}}', so rendering the default 'Meeting Summary' template without a 'transcript' entry yields a prompt containing the literal text '{{transcript}}' — which would be sent to an LLM as if it were content, producing a nonsense summary instead of a 'missing required variable' error. The validation helper exists but is dead code.
   - **Suggested fix:** Call template.validate_variables(&variables) in render_template and return Err listing missing required variables before substituting.
+  - **Verification:** render_template now calls template.validate_variables and returns a Config error listing missing required variables before substitution, instead of leaking literal {{placeholders}} into the prompt. Verified: cargo test -> 34 passed; clippy no new warnings.
 
-- [ ] **#45** `error-handling` — Unclosed or nested {{ placeholders silently delete template text
+- [x] **#45** `error-handling` — Unclosed or nested {{ placeholders silently delete template text — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/prompt_manager/variable_substitution.rs:11-32`
   - **Root cause:** The scanner accumulates characters into current_var while in_variable and only emits them when a closing }} is found. If the template ends with an unclosed placeholder (e.g. 'Summarize the transcript: {{transcript' — a plausible user typo in the template editor), everything from {{ onward is silently dropped and Ok is returned, so the rendered prompt loses the transcript instruction with no error. A nested '{{' inside a variable also clears current_var (line 15), discarding the text accumulated so far. (Positive note: substitution is single-pass over the template only, so substituted values containing {{...}} are NOT re-expanded — there is no recursive/unbounded expansion vulnerability.)
   - **Suggested fix:** On end-of-input with in_variable=true, either return Err(RecapError::Config('unclosed placeholder')) or emit the literal consumed text; treat a nested '{{' as literal content or an error rather than silently resetting.
+  - **Verification:** substitute_variables emits the consumed text literally when a placeholder is unclosed at end-of-input (no silent deletion), and a nested '{{' no longer clears the accumulated variable text. Verified: cargo test -> 34 passed incl. test_unclosed_placeholder_preserves_text; clippy no new warnings.
 
 - [x] **#46** `security` — Derived master key and passphrase copies are never zeroized despite zeroize being a declared dependency — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/storage/encryption_manager.rs:10-14`
@@ -365,15 +369,17 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Derive max_tokens from the word budget with headroom for JSON structure (e.g. (max_length/5)*2 + 256, capped), or request a bounded number of items per category in STRUCTURED_OUTPUT_INSTRUCTION; detect finish_reason='length' and retry/flag rather than silently falling back.
   - **Verification:** openai/anthropic max_tokens now derived from the word budget with JSON headroom ((max_length/5)*2+256, capped at 4096) instead of treating the max_length character/word setting as a token count, avoiding mid-JSON truncation. Verified: cargo test -> 32 passed; clippy no new warnings.
 
-- [ ] **#58** `bug` — max_length is never enforced as a length bound on the produced summary
+- [x] **#58** `bug` — max_length is never enforced as a length bound on the produced summary — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/summarization/rule_based.rs:27-39`
   - **Root cause:** num_sentences = (config.max_length / 20).max(1).min(sentences.len()) assumes ~20 characters per sentence and then joins whole sentences with no truncation. Real meeting sentences are frequently 100-300 characters, so with max_length=500 the 'summary' can be several thousand characters — the config field's contract (maximum summary length) is silently violated, and downstream UI/sync payloads sized around max_length receive far more text.
   - **Suggested fix:** After joining, truncate to max_length characters on a sentence/word boundary (or accumulate sentences until the budget is exhausted), and document max_length's unit (characters vs words) consistently with the LLM prompts.
+  - **Verification:** rule_based summarize now truncates the joined summary to max_length characters on a word boundary (char-safe for multibyte), enforcing the length contract the sentence-count heuristic alone violated. Verified: cd desktop-app/src-tauri && cargo test -> 34 passed incl. test_summary_respects_max_length; clippy no new warnings.
 
-- [ ] **#59** `maintainability` — No-op 'extractive' assertion loop gives false test-coverage confidence
+- [x] **#59** `maintainability` — No-op 'extractive' assertion loop gives false test-coverage confidence — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/summarization/rule_based_test.rs:23-29`
   - **Root cause:** test_summary_is_non_empty_and_extractive claims 'every summary sentence must appear in the source text' but the sentence loop body is `let _ = sentence;` (lines 24-26) — it asserts nothing. Only the weaker word-membership check below runs, which would pass even for a reordered/recombined summary that is not truly extractive at sentence granularity.
   - **Suggested fix:** Assert each selected sentence (split on the same sentence boundaries the summarizer uses) is a substring of SAMPLE, or delete the dead loop and the misleading comment.
+  - **Verification:** Removed the no-op `let _ = sentence;` loop that gave false extractive-coverage confidence; the meaningful word-membership assertion remains. Verified: cargo test -> 34 passed; clippy no new warnings.
 
 - [x] **#60** `error-handling` — reqwest builder failure silently falls back to a default client with no timeout — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/sync/client.rs:52-55`

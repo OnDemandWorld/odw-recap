@@ -517,7 +517,9 @@
     "end_line": 39,
     "title": "get_template re-extracts variables, discarding stored defaults and fabricating metadata",
     "root_cause": "get_template rebuilds PromptTemplate from storage content via extract_variables, which marks every variable required=true with default_value=None. The defaults declared in initialize_default_templates (e.g. max_length default '500', lines 81-87) are therefore lost on read: validate_variables on a freshly-loaded default template reports max_length as missing even though a default was defined. id is hardcoded 0 and created_at/updated_at are set to 'now' on every read, fabricating metadata. save_template (line 47) also drops description and meeting_type (passes None), so the meeting_type association the schema supports is never persisted through this API.",
-    "suggested_fix": "Persist and reload the full variable definitions (name/description/default/required) and template metadata instead of re-deriving them; pass template.meeting_type/description through save_prompt_template."
+    "suggested_fix": "Persist and reload the full variable definitions (name/description/default/required) and template metadata instead of re-deriving them; pass template.meeting_type/description through save_prompt_template.",
+    "status": "skipped",
+    "verification_notes": "Skipped (schema migration beyond minimal scope): the prompt_templates storage schema persists only content/name/meeting_type/is_custom, not variable definitions or defaults, so get_template cannot reload stored defaults (e.g. max_length=500) without a schema change; it also fabricates id/created_at/updated_at. Recommended follow-up: persist full variable definitions (name/description/default/required) and template metadata, and pass meeting_type/description through save_prompt_template."
   },
   {
     "id": 43,
@@ -528,7 +530,9 @@
     "end_line": 58,
     "title": "list_templates silently returns an empty vec although StorageManager::list_prompt_templates exists",
     "root_cause": "The method comments 'would need a list_prompt_templates method in StorageManager' and returns Ok(Vec::new()), but that method already exists and is used by main.rs list_prompt_templates (main.rs line 335). Any caller of PromptManager::list_templates gets a silently wrong empty result instead of an error or the real data. The whole PromptManager struct is currently dead code (never constructed outside its module), which masks the stub behavior.",
-    "suggested_fix": "Implement list_templates via storage.list_prompt_templates() (mapping rows to PromptTemplate), or remove the dead PromptManager API surface in favor of the storage-backed commands until it is wired into the pipeline."
+    "suggested_fix": "Implement list_templates via storage.list_prompt_templates() (mapping rows to PromptTemplate), or remove the dead PromptManager API surface in favor of the storage-backed commands until it is wired into the pipeline.",
+    "status": "fixed",
+    "verification_notes": "list_templates implemented via StorageManager::list_prompt_templates + get_template (previously a stub returning an empty vec despite the storage method existing). Verified: cargo test -> 34 passed; clippy no new warnings."
   },
   {
     "id": 44,
@@ -539,7 +543,9 @@
     "end_line": 71,
     "title": "render_template never validates required variables; missing values pass through as literal {{placeholders}}",
     "root_cause": "render_template calls substitute_variables directly without PromptTemplate::validate_variables (template.rs lines 77-98). substitute_variables deliberately keeps unknown placeholders as '{{name}}', so rendering the default 'Meeting Summary' template without a 'transcript' entry yields a prompt containing the literal text '{{transcript}}' — which would be sent to an LLM as if it were content, producing a nonsense summary instead of a 'missing required variable' error. The validation helper exists but is dead code.",
-    "suggested_fix": "Call template.validate_variables(&variables) in render_template and return Err listing missing required variables before substituting."
+    "suggested_fix": "Call template.validate_variables(&variables) in render_template and return Err listing missing required variables before substituting.",
+    "status": "fixed",
+    "verification_notes": "render_template now calls template.validate_variables and returns a Config error listing missing required variables before substitution, instead of leaking literal {{placeholders}} into the prompt. Verified: cargo test -> 34 passed; clippy no new warnings."
   },
   {
     "id": 45,
@@ -550,7 +556,9 @@
     "end_line": 32,
     "title": "Unclosed or nested {{ placeholders silently delete template text",
     "root_cause": "The scanner accumulates characters into current_var while in_variable and only emits them when a closing }} is found. If the template ends with an unclosed placeholder (e.g. 'Summarize the transcript: {{transcript' — a plausible user typo in the template editor), everything from {{ onward is silently dropped and Ok is returned, so the rendered prompt loses the transcript instruction with no error. A nested '{{' inside a variable also clears current_var (line 15), discarding the text accumulated so far. (Positive note: substitution is single-pass over the template only, so substituted values containing {{...}} are NOT re-expanded — there is no recursive/unbounded expansion vulnerability.)",
-    "suggested_fix": "On end-of-input with in_variable=true, either return Err(RecapError::Config('unclosed placeholder')) or emit the literal consumed text; treat a nested '{{' as literal content or an error rather than silently resetting."
+    "suggested_fix": "On end-of-input with in_variable=true, either return Err(RecapError::Config('unclosed placeholder')) or emit the literal consumed text; treat a nested '{{' as literal content or an error rather than silently resetting.",
+    "status": "fixed",
+    "verification_notes": "substitute_variables emits the consumed text literally when a placeholder is unclosed at end-of-input (no silent deletion), and a nested '{{' no longer clears the accumulated variable text. Verified: cargo test -> 34 passed incl. test_unclosed_placeholder_preserves_text; clippy no new warnings."
   },
   {
     "id": 46,
@@ -715,7 +723,9 @@
     "end_line": 39,
     "title": "max_length is never enforced as a length bound on the produced summary",
     "root_cause": "num_sentences = (config.max_length / 20).max(1).min(sentences.len()) assumes ~20 characters per sentence and then joins whole sentences with no truncation. Real meeting sentences are frequently 100-300 characters, so with max_length=500 the 'summary' can be several thousand characters — the config field's contract (maximum summary length) is silently violated, and downstream UI/sync payloads sized around max_length receive far more text.",
-    "suggested_fix": "After joining, truncate to max_length characters on a sentence/word boundary (or accumulate sentences until the budget is exhausted), and document max_length's unit (characters vs words) consistently with the LLM prompts."
+    "suggested_fix": "After joining, truncate to max_length characters on a sentence/word boundary (or accumulate sentences until the budget is exhausted), and document max_length's unit (characters vs words) consistently with the LLM prompts.",
+    "status": "fixed",
+    "verification_notes": "rule_based summarize now truncates the joined summary to max_length characters on a word boundary (char-safe for multibyte), enforcing the length contract the sentence-count heuristic alone violated. Verified: cd desktop-app/src-tauri && cargo test -> 34 passed incl. test_summary_respects_max_length; clippy no new warnings."
   },
   {
     "id": 59,
@@ -726,7 +736,9 @@
     "end_line": 29,
     "title": "No-op 'extractive' assertion loop gives false test-coverage confidence",
     "root_cause": "test_summary_is_non_empty_and_extractive claims 'every summary sentence must appear in the source text' but the sentence loop body is `let _ = sentence;` (lines 24-26) — it asserts nothing. Only the weaker word-membership check below runs, which would pass even for a reordered/recombined summary that is not truly extractive at sentence granularity.",
-    "suggested_fix": "Assert each selected sentence (split on the same sentence boundaries the summarizer uses) is a substring of SAMPLE, or delete the dead loop and the misleading comment."
+    "suggested_fix": "Assert each selected sentence (split on the same sentence boundaries the summarizer uses) is a substring of SAMPLE, or delete the dead loop and the misleading comment.",
+    "status": "fixed",
+    "verification_notes": "Removed the no-op `let _ = sentence;` loop that gave false extractive-coverage confidence; the meaningful word-membership assertion remains. Verified: cargo test -> 34 passed; clippy no new warnings."
   },
   {
     "id": 60,

@@ -49,12 +49,25 @@ impl PromptManager {
 
     /// List all prompt templates
     pub fn list_templates(&self) -> Result<Vec<PromptTemplate>> {
-        let storage = self.storage.lock().map_err(|_| {
-            crate::error::RecapError::Storage("Failed to lock storage".to_string())
-        })?;
-        // Note: This would need a list_prompt_templates method in StorageManager
-        // For now, return empty vec
-        Ok(Vec::new())
+        // Audit #43: backed by StorageManager::list_prompt_templates (previously
+        // a stub returning an empty vec despite the storage method existing).
+        let names: Vec<String> = {
+            let storage = self.storage.lock().map_err(|_| {
+                crate::error::RecapError::Storage("Failed to lock storage".to_string())
+            })?;
+            storage
+                .list_prompt_templates()?
+                .into_iter()
+                .map(|(name, _, _)| name)
+                .collect()
+        };
+        let mut templates = Vec::new();
+        for name in names {
+            if let Some(t) = self.get_template(&name)? {
+                templates.push(t);
+            }
+        }
+        Ok(templates)
     }
 
     /// Render a prompt template with variable substitution
@@ -66,6 +79,16 @@ impl PromptManager {
         let template = self
             .get_template(template_name)?
             .ok_or_else(|| crate::error::RecapError::Config("Template not found".to_string()))?;
+
+        // Audit #44: validate required variables before substituting, so a
+        // missing value errors instead of leaking a literal {{placeholder}}
+        // into the prompt sent to the LLM.
+        template.validate_variables(&variables).map_err(|missing| {
+            crate::error::RecapError::Config(format!(
+                "missing required template variables: {}",
+                missing.join(", ")
+            ))
+        })?;
 
         substitute_variables(&template.content, &variables)
     }

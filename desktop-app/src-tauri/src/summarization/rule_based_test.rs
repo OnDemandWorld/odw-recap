@@ -20,13 +20,25 @@ fn test_summary_is_non_empty_and_extractive() {
     let result = RuleBasedSummarizer::new().summarize(SAMPLE, config()).unwrap();
     assert!(!result.summary.is_empty());
     assert_eq!(result.provider, "rule_based");
-    // Extractive: every summary sentence must appear in the source text.
-    for sentence in result.summary.split(" ") {
-        let _ = sentence;
-    }
+    // Extractive: every summary word must appear in the source text. (Audit #59:
+    // removed a no-op `let _ = sentence;` loop that asserted nothing.)
     for word in result.summary.split_whitespace() {
         assert!(SAMPLE.contains(word.trim_matches(|c: char| !c.is_alphanumeric())), "word {word} not in source");
     }
+}
+
+// Audit #58: the produced summary must respect max_length as a character bound
+// (allowing one trailing ellipsis char from word-boundary truncation).
+#[test]
+fn test_summary_respects_max_length() {
+    let cfg = SummarizationConfig { max_length: 50, ..SummarizationConfig::default() };
+    let result = RuleBasedSummarizer::new().summarize(SAMPLE, cfg).unwrap();
+    assert!(
+        result.summary.chars().count() <= 51,
+        "summary exceeded max_length: {} chars ({:?})",
+        result.summary.chars().count(),
+        result.summary
+    );
 }
 
 #[test]

@@ -32,11 +32,20 @@ impl RuleBasedSummarizer {
             .collect();
         selected_indices.sort();
 
-        let summary = selected_indices
+        let mut summary = selected_indices
             .iter()
             .map(|&i| sentences[i].trim())
             .collect::<Vec<_>>()
             .join(" ");
+
+        // Audit #58: max_length is a maximum summary length (characters); the
+        // sentence-count heuristic alone could overshoot it badly. Truncate on a
+        // word boundary (char-safe for multibyte text).
+        if summary.chars().count() > config.max_length {
+            let truncated: String = summary.chars().take(config.max_length).collect();
+            let cut = truncated.rfind(' ').unwrap_or(truncated.len());
+            summary = format!("{}…", &truncated[..cut]);
+        }
 
         // Extract action items and decisions (simple keyword matching)
         let action_items = self.extract_action_items(text);
