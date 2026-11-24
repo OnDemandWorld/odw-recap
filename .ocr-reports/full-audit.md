@@ -486,3 +486,17 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
 ## Coverage
 
 91 of 91 source files reviewed (100%). Four parallel read-only passes: (A) Rust core/storage/sync, (B) Rust audio/providers/prompt, (C) Go team-server, (D) frontend/scripts/CI/config. Every in-scope source file read in full; none skipped.
+
+## Final verification (whole fix branch)
+
+Run after all High + Medium batches were applied:
+
+| Suite | Command | Result |
+|-------|---------|--------|
+| Rust | `cd desktop-app/src-tauri && cargo test` | 28 passed, 0 failed (baseline 15) |
+| Rust lint | `cargo clippy --all-targets` | exit 0; no new warnings vs baseline (pre-existing stub dead-code/unused-import warnings remain) |
+| Go | `cd team-server && go vet ./... && go test ./...` | vet 0; all packages ok |
+| Go format | `gofmt -l internal/ cmd/` | clean |
+| Frontend | `cd desktop-app && npm test` | 25 passed, 2 suites (baseline 22) |
+
+No new lint/type/test failures beyond the pre-existing baseline (`cargo fmt --check` was already non-clean before this work and was not mass-reformatted). Two Medium items are intentionally skipped with rationale (#17 custom-prompt feature wiring, #22 per-target sync retry state); all 61 Low items remain open for a future pass.
