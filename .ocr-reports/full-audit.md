@@ -554,10 +554,10 @@ Run after High + Medium batches (re-run as Low batches land):
 
 | Suite | Command | Result |
 |-------|---------|--------|
-| Rust | `cd desktop-app/src-tauri && cargo test` | 28 passed, 0 failed (baseline 15) |
+| Rust | `cd desktop-app/src-tauri && cargo test` | 35 passed, 0 failed (baseline 15) |
 | Rust lint | `cargo clippy --all-targets` | exit 0; no new warnings vs baseline |
 | Go | `cd team-server && go vet ./... && go test ./...` | vet 0; all packages ok |
 | Go format | `gofmt -l internal/ cmd/` | clean |
 | Frontend | `cd desktop-app && npm test` | 25 passed, 2 suites (baseline 22) |
 
-No new lint/type/test failures beyond the pre-existing baseline (`cargo fmt --check` was already non-clean before this work and was not mass-reformatted). Skipped items carry a rationale; remaining open items are itemized above for future passes.
+No new lint/type/test failures beyond the pre-existing baseline (`cargo fmt --check` was already non-clean before this work and was not mass-reformatted). All 84 findings are addressed: 70 fixed and 14 skipped with documented rationale (broad/architectural items and integration-pending stubs); 0 remain open.
