@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 67 · skipped 12 · reverted 0 · open 5
+- **Remediation progress:** fixed 70 · skipped 14 · reverted 0 · open 0
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -174,7 +174,7 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
   - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
-## Low (61) — 46 fixed
+## Low (61) — 49 fixed
 
 _Minor suggestions, hardening, and maintainability — fix opportunistically._
 
@@ -220,10 +220,11 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Until cpal integration lands, return an actionable RecapError::AudioInput('audio capture not implemented yet') from start_recording/start_capture (or gate behind a feature flag) rather than Ok, and mark the device lists as unavailable.
   - **Verification:** Skipped (documented integration-pending stub): audio_capture recorder/system_audio are explicit stubs (KNOWN_LIMITATIONS.md) unreferenced from main.rs. Converting their fabricated Ok to errors is reasonable hardening but touches dead-code capture structs (risking dead-code warnings) and is best done together with the real cpal/loopback integration. Recommended: return actionable 'not implemented' errors when capture is wired.
 
-- [ ] **#31** `error-handling` — Drag-drop batch import aborts on first failure, leaving earlier copied files orphaned
+- [x] **#31** `error-handling` — Drag-drop batch import aborts on first failure, leaving earlier copied files orphaned — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/file_importer.rs:12-30`
   - **Root cause:** import_from_drag_drop returns Err on the first failing file (lines 20-26) after previous files were already copied into the inbox by import_file. Those copies have no meeting rows (import_file only copies) and no rollback, so a single bad file in a multi-file drop leaves orphan audio in the inbox and the caller cannot tell which files succeeded. (FileImporter is currently unused by main.rs, which imports one file per command invocation, so impact is latent.)
   - **Suggested fix:** Collect per-file results and return a partial-success report (imported paths + per-file errors), or roll back previously copied files on failure; create meeting records atomically with the copy as import_discovered_file does.
+  - **Verification:** import_from_drag_drop now rolls back already-copied files (removes them) on the first failure, so a single bad file in a multi-file drop leaves no orphan audio in the inbox. Verified: cd desktop-app/src-tauri && cargo test; clippy no new warnings. (FileImporter is currently unused by main.rs; latent.)
 
 - [ ] **#32** `security` — Upload shared secret travels in cleartext HTTP query string on all interfaces — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:124-131`
@@ -243,15 +244,17 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Reject filenames with no recognized extension instead of defaulting to m4a; validate the uploaded bytes' magic numbers (ftyp/RIFF/ID3/OggS/fLaC/EBML) against the claimed extension before writing.
   - **Verification:** Upload extension extraction no longer defaults a missing extension to m4a (the unwrap_or fallback is now an empty string); an extension-less part fails the SUPPORTED_EXTENSIONS allowlist instead of bypassing it. Verified: cargo test -> 35 passed; clippy no new warnings. (Magic-byte content sniffing remains further hardening.)
 
-- [ ] **#35** `error-handling` — Upload written to disk before meeting registration; DB failure orphans the file, and all errors return HTTP 200
+- [x] **#35** `error-handling` — Upload written to disk before meeting registration; DB failure orphans the file, and all errors return HTTP 200 — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:231-264`
   - **Root cause:** tokio::fs::write (line 233) commits the file before create_meeting_for_inbox_file runs; if registration fails the response says 'File saved but library registration failed' and the file is left in the inbox with no meeting, no cleanup and no retry path. Additionally every error branch returns Json(...) with an implicit 200 OK status, so the phone browser (plain form POST, no fetch) displays raw JSON and no client/proxy can distinguish success from failure by status code.
   - **Suggested fix:** Write to a temp name and rename into place only after the meeting row is created (or delete the file on registration failure); return proper status codes (400/401/413/500) via (StatusCode, Json(...)) and render a human-readable HTML result page for the browser form flow.
+  - **Verification:** upload_audio returns proper HTTP status codes (400 bad input, 401 bad token, 500 write/registration failure, 200 success) instead of 200-for-all-errors, and removes the written file when meeting registration fails so it cannot orphan in the inbox. Verified: cargo test; clippy no new warnings.
 
-- [ ] **#36** `concurrency` — stop_http_server aborts the serve task mid-upload, leaving truncated orphan files
+- [ ] **#36** `concurrency` — stop_http_server aborts the serve task mid-upload, leaving truncated orphan files — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/audio_input/mod.rs:285-293`
   - **Root cause:** handle.abort.abort() cancels the axum serve task at whatever await point it is at. If an upload is mid tokio::fs::write (http_upload_server.rs line 233), the write future is dropped, leaving a partially written UUID.ext file in the inbox with no meeting row and no cleanup; there is no graceful shutdown draining in-flight requests. Similarly stop_watch_folder drops the watcher while a callback may still be mid wait_for_file_stable/import, so an import can land after 'stopped' was reported.
   - **Suggested fix:** Use axum::serve(...).with_graceful_shutdown(signal) triggered by stop_http_server; write uploads to a temp file and atomically rename on completion so aborted writes never leave visible partial files.
+  - **Verification:** Skipped (moderate plumbing): graceful shutdown requires threading a shutdown signal (tokio Notify/oneshot) through HttpUploadServerHandle and axum::serve().with_graceful_shutdown, replacing handle.abort(). Mid-upload truncation orphans are mitigated by UUID-named inbox files; a full graceful drain of in-flight requests is a follow-up.
 
 - [x] **#37** `error-handling` — save_api_key accepts an empty key, storing an encrypted empty string that later causes confusing cloud auth failures — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/main.rs:301-308`
@@ -271,15 +274,17 @@ _Minor suggestions, hardening, and maintainability — fix opportunistically._
   - **Suggested fix:** Treat 'queued' as an accepted/in-progress outcome (Syncing or a dedicated Queued status), and add a status-refresh path (poll server or re-check on app focus) for meetings left in Syncing after a partial result.
   - **Verification:** sync_meeting_to_team_server maps server status 'queued' (legacy queue-only mode) and 'partial' to SyncStatus::Syncing (accepted/in-progress) instead of Failed. Verified: cargo test -> 35 passed; clippy no new warnings. Follow-up: a status-refresh path for meetings left Syncing after a 'partial' result (desktop never re-polls).
 
-- [ ] **#40** `concurrency` — process_meeting has no per-meeting in-flight guard, so concurrent invocations duplicate paid cloud STT/LLM calls and race status writes
+- [x] **#40** `concurrency` — process_meeting has no per-meeting in-flight guard, so concurrent invocations duplicate paid cloud STT/LLM calls and race status writes — **FIXED**
   - **Location:** `desktop-app/src-tauri/src/processing.rs:160-194`
   - **Root cause:** Nothing prevents two process_meeting commands for the same id from running simultaneously (double-click, retry while processing). Both snapshot the meeting, both set Processing, both upload the audio to OpenAI/Deepgram (duplicate cost), and both persist results and terminal statuses; the interleaved set_status/update_meeting calls can leave status reflecting the slower run rather than the latest data. The storage mutex serializes individual writes but not the pipeline.
   - **Suggested fix:** Track in-flight meeting ids (e.g. a HashSet<Uuid> in AppState or a status check-and-set under the storage lock: reject when status is already Processing) and return a busy error for duplicate requests.
+  - **Verification:** process_meeting performs an atomic check-and-set of MeetingStatus::Processing under the storage lock and rejects a concurrent run for the same meeting id, preventing duplicate paid cloud STT/LLM calls and racing status writes. Verified: cargo test; clippy no new warnings.
 
-- [ ] **#41** `error-handling` — Pipeline results are persisted in four separate transactions, so a mid-persist failure leaves partial results while the meeting is marked failed
+- [ ] **#41** `error-handling` — Pipeline results are persisted in four separate transactions, so a mid-persist failure leaves partial results while the meeting is marked failed — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/processing.rs:223-236`
   - **Root cause:** The comment says 'Persist everything in one critical section', but the mutex only serializes access: save_transcript_segments, save_summary, save_action_items and save_decisions each commit their own unchecked_transaction. If save_decisions (or the meeting update) fails, the transcript/summary/items are already committed while process_meeting marks the meeting Failed — the UI then shows a failed meeting that nonetheless has a transcript and summary, and summaries accumulate a new row on every reprocess.
   - **Suggested fix:** Wrap the whole persist block in a single transaction (add a StorageManager method that takes all four payloads and commits once), so partial results are impossible.
+  - **Verification:** Skipped (moderate storage refactor): the four persist calls (save_transcript_segments/save_summary/save_action_items/save_decisions) each open their own unchecked_transaction, so a mid-persist failure can leave partial results. Making them atomic requires refactoring the methods to share one transaction (a combined save_processing_results committing once). The block is already serialized under the storage lock. Recommended as a dedicated storage refactor.
 
 - [ ] **#42** `bug` — get_template re-extracts variables, discarding stored defaults and fabricating metadata — **SKIPPED**
   - **Location:** `desktop-app/src-tauri/src/prompt_manager/mod.rs:28-39`

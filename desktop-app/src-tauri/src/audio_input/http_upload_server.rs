@@ -1,6 +1,7 @@
 use crate::error::{RecapError, Result};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Query, State},
+    http::StatusCode,
     response::{Html, IntoResponse, Json},
     routing::{get, post},
     Router,
@@ -176,10 +177,10 @@ async fn upload_audio(
     while let Some(field) = match multipart.next_field().await {
         Ok(f) => f,
         Err(e) => {
-            return Json(json!({
+            return (StatusCode::BAD_REQUEST, Json(json!({
                 "status": "error",
                 "message": format!("Malformed multipart upload: {}", e)
-            }));
+            })));
         }
     } {
         let name = field.name().unwrap_or("").to_string();
@@ -188,10 +189,10 @@ async fn upload_audio(
                 if ct_eq(value.as_bytes(), state.token.as_bytes()) {
                     pre_authorized = true;
                 } else if !pre_authorized {
-                    return Json(json!({
+                    return (StatusCode::UNAUTHORIZED, Json(json!({
                         "status": "error",
                         "message": "Invalid or missing upload token"
-                    }));
+                    })));
                 }
             }
             continue;
@@ -199,10 +200,10 @@ async fn upload_audio(
         if name == "file" {
             if !pre_authorized {
                 // Reject before allocating the body — no unauthenticated buffering.
-                return Json(json!({
+                return (StatusCode::UNAUTHORIZED, Json(json!({
                     "status": "error",
                     "message": "Invalid or missing upload token"
-                }));
+                })));
             }
             let filename = field.file_name().unwrap_or("recording.m4a").to_string();
             // Audit #34: do not default a missing extension to m4a — that let an
@@ -224,47 +225,47 @@ async fn upload_audio(
     }
 
     if !pre_authorized {
-        return Json(json!({
+        return (StatusCode::UNAUTHORIZED, Json(json!({
             "status": "error",
             "message": "Invalid or missing upload token"
-        }));
+        })));
     }
 
     let data = match file_data {
         Some(Ok(data)) => data,
         Some(Err(e)) => {
-            return Json(json!({
+            return (StatusCode::BAD_REQUEST, Json(json!({
                 "status": "error",
                 "message": format!("{}", e)
-            }));
+            })));
         }
         None => {
-            return Json(json!({
+            return (StatusCode::BAD_REQUEST, Json(json!({
                 "status": "error",
                 "message": "No file provided"
-            }));
+            })));
         }
     };
 
     // R-2: reject unsupported extensions up front.
     if !SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-        return Json(json!({
+        return (StatusCode::BAD_REQUEST, Json(json!({
             "status": "error",
             "message": format!(
                 "Unsupported file type '.{}'. Supported: {}",
                 ext,
                 SUPPORTED_EXTENSIONS.join(", ")
             )
-        }));
+        })));
     }
 
     let uuid = Uuid::new_v4();
     let path = state.inbox_path.join(format!("{}.{}", uuid, ext));
     if let Err(e) = tokio::fs::write(&path, &data).await {
-        return Json(json!({
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
             "status": "error",
             "message": format!("Failed to save file: {}", e)
-        }));
+        })));
     }
 
     // R-2: create the REAL library meeting so the upload shows up in Recap and
@@ -281,16 +282,21 @@ async fn upload_audio(
         &state.llm_provider,
     );
     match meeting_result {
-        Ok(meeting_id) => Json(json!({
+        Ok(meeting_id) => (StatusCode::OK, Json(json!({
             "status": "uploaded",
             "meeting_id": meeting_id,
             "message": "Uploaded — the meeting now appears in your Recap library.",
             "path": path.to_string_lossy().to_string()
-        })),
-        Err(e) => Json(json!({
-            "status": "error",
-            "message": format!("File saved but library registration failed: {}", e)
-        })),
+        }))),
+        Err(e) => {
+            // Audit #35: registration failed — remove the written file so it does
+            // not orphan in the inbox with no meeting row, and report a 500.
+            let _ = tokio::fs::remove_file(&path).await;
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "status": "error",
+                "message": format!("Library registration failed (upload discarded): {}", e)
+            })))
+        }
     }
 }
 

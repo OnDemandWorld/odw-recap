@@ -18,6 +18,12 @@ impl FileImporter {
             match manager.import_file(&file) {
                 Ok(path) => imported.push(path),
                 Err(e) => {
+                    // Audit #31: roll back files already copied so a single bad
+                    // file in a multi-file drop does not leave orphan audio (with
+                    // no meeting rows) in the inbox.
+                    for copied in &imported {
+                        let _ = std::fs::remove_file(copied);
+                    }
                     return Err(RecapError::AudioInput(format!(
                         "Failed to import {}: {}",
                         file.display(),

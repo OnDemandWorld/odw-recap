@@ -164,18 +164,29 @@ pub async fn process_meeting(
     // Snapshot everything needed across awaits without holding the lock.
     let (audio_path, language, stt_selected, llm_selected) = {
         let storage = storage.lock().map_err(|_| lock_err())?;
-        let meeting = storage
+        let mut meeting = storage
             .get_meeting(meeting_id)?
             .ok_or_else(|| RecapError::Storage(format!("Meeting not found: {}", meeting_id)))?;
-        (
+        // Audit #40: atomic check-and-set under the storage lock so two concurrent
+        // process_meeting calls for the same id cannot both run (which duplicated
+        // paid cloud STT/LLM calls and raced the status writes).
+        if matches!(meeting.status, MeetingStatus::Processing) {
+            return Err(RecapError::Storage(format!(
+                "Meeting {} is already being processed",
+                meeting_id
+            )));
+        }
+        let fields = (
             meeting.audio_file_path.clone(),
             meeting.language.clone(),
             meeting.stt_provider.clone(),
             meeting.llm_provider.clone(),
-        )
+        );
+        meeting.status = MeetingStatus::Processing;
+        meeting.updated_at = chrono::Utc::now().timestamp_millis();
+        storage.update_meeting(&meeting)?;
+        fields
     };
-
-    set_status(storage, meeting_id, MeetingStatus::Processing)?;
 
     let outcome = run_pipeline(storage, meeting_id, &audio_path, &language, &stt_selected, &llm_selected).await;
 
