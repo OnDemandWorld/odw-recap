@@ -21,6 +21,11 @@ import (
 // transcript/summary metadata (not audio), so a few MiB is generous.
 const maxJSONBodySize = 4 << 20 // 4 MiB
 
+// bootstrapAdminLock is a fixed advisory-lock key serializing the
+// first-account-becomes-admin bootstrap (audit #21) so two concurrent
+// registrations on an empty users table cannot both observe count==0.
+const bootstrapAdminLock int64 = 8675309
+
 // RegisterRequest represents a registration request
 type RegisterRequest struct {
 	Email    string `json:"email"`
@@ -97,9 +102,27 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Create user. R-10: the FIRST account becomes admin — no role elevation
 	// endpoint exists, so without this /admin/* routes are unreachable without
 	// hand-written SQL.
+	//
+	// Audit #21: the count-then-insert bootstrap is a TOCTOU race — two
+	// concurrent registrations on an empty users table both saw count==0 and
+	// both became admin. Run the count+insert in one transaction guarded by a
+	// fixed advisory lock so the bootstrap is serialized and exactly one admin
+	// is ever created this way.
+	tx, err := s.db.DB().BeginTx(r.Context(), nil)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create user")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(r.Context(), "SELECT pg_advisory_xact_lock($1)", bootstrapAdminLock); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create user")
+		return
+	}
+
 	role := "member"
 	var count int
-	if err := s.db.DB().QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err == nil && count == 0 {
+	if err := tx.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM users").Scan(&count); err == nil && count == 0 {
 		role = "admin"
 	}
 
@@ -114,16 +137,19 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert into database
-	_, err = s.db.DB().Exec(
+	if _, err := tx.ExecContext(r.Context(),
 		"INSERT INTO users (id, email, password_hash, name, role, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
 		user.ID, user.Email, user.PasswordHash, user.Name, user.Role, user.CreatedAt, user.UpdatedAt,
-	)
-	if err != nil {
+	); err != nil {
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
 			respondError(w, http.StatusConflict, "An account with this email already exists")
 			return
 		}
+		respondError(w, http.StatusInternalServerError, "Failed to create user")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create user")
 		return
 	}

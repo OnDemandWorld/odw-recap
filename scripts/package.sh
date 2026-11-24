@@ -1,5 +1,10 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+# Anchor to the repo root regardless of the caller's CWD (audit #20: relative
+# cd/cp paths previously resolved from team-server/ and silently copied nothing).
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 echo "Packaging Recap for distribution..."
 
@@ -11,28 +16,33 @@ echo "Packaging for $PLATFORM ($ARCH)..."
 
 # Package desktop app
 echo "Packaging desktop app..."
-cd desktop-app
+cd "$ROOT/desktop-app"
 npm install
 npm run tauri build
 
 # Package team server
 echo "Packaging team server..."
-cd ../team-server
+cd "$ROOT/team-server"
 go build -o recap-team-server ./cmd/server
 
 # Create distribution directory
-mkdir -p ../dist
-cp recap-team-server ../dist/
+mkdir -p "$ROOT/dist"
+cp recap-team-server "$ROOT/dist/"
 
+# Desktop bundles live under desktop-app/src-tauri/target/release/bundle —
+# reference them from the repo root, not the team-server CWD. Errors are no
+# longer suppressed: a missing bundle for the current platform fails loudly
+# instead of shipping a dist/ with only the Go binary.
+BUNDLE="$ROOT/desktop-app/src-tauri/target/release/bundle"
 if [ "$PLATFORM" = "Darwin" ]; then
-    cp -r src-tauri/target/release/bundle/dmg/*.dmg ../dist/ 2>/dev/null || true
-    cp -r src-tauri/target/release/bundle/macos/*.app ../dist/ 2>/dev/null || true
+    cp -r "$BUNDLE"/dmg/*.dmg "$ROOT/dist/"
+    cp -r "$BUNDLE"/macos/*.app "$ROOT/dist/"
 elif [ "$PLATFORM" = "Linux" ]; then
-    cp src-tauri/target/release/bundle/deb/*.deb ../dist/ 2>/dev/null || true
-    cp src-tauri/target/release/bundle/appimage/*.AppImage ../dist/ 2>/dev/null || true
+    cp "$BUNDLE"/deb/*.deb "$ROOT/dist/"
+    cp "$BUNDLE"/appimage/*.AppImage "$ROOT/dist/"
 elif [ "$PLATFORM" = "MINGW"* ] || [ "$PLATFORM" = "CYGWIN"* ]; then
-    cp src-tauri/target/release/bundle/msi/*.msi ../dist/ 2>/dev/null || true
-    cp src-tauri/target/release/bundle/nsis/*.exe ../dist/ 2>/dev/null || true
+    cp "$BUNDLE"/msi/*.msi "$ROOT/dist/"
+    cp "$BUNDLE"/nsis/*.exe "$ROOT/dist/"
 fi
 
 echo "Packaging complete! Artifacts in dist/"

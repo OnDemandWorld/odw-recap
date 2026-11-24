@@ -71,6 +71,14 @@ func (w *QueueWorker) Start(ctx context.Context) {
 // processOnce claims up to claimBatchSize due rows (FOR UPDATE SKIP LOCKED so
 // multiple server replicas never double-process) and forwards each.
 func (w *QueueWorker) processOnce(ctx context.Context) {
+	// Audit #23: contain a panic from a single malformed row so it can never
+	// take down the whole server process (the worker goroutine has no other
+	// recover). The next poll re-claims whatever was not settled.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("sync queue worker: recovered from panic: %v", r)
+		}
+	}()
 	rows, err := w.claim(ctx)
 	if err != nil {
 		log.Printf("sync queue worker: claim failed: %v", err)
@@ -190,7 +198,7 @@ func (w *QueueWorker) settle(ctx context.Context, id int64, status string, retry
 			status, retryCount, id)
 	} else {
 		// Exponential backoff: attempt N waits base * 2^(N-1).
-		delay := baseRetryDelay << (retryCount - 1)
+		delay := retryDelay(retryCount)
 		_, err = w.db.ExecContext(ctx,
 			"UPDATE sync_queue SET status = $1, retry_count = $2, last_error = $3, next_attempt_at = NOW() + $4::interval WHERE id = $5",
 			status, retryCount, truncateErr(errMsg), delay.String(), id)
@@ -198,6 +206,22 @@ func (w *QueueWorker) settle(ctx context.Context, id int64, status string, retry
 	if err != nil {
 		log.Printf("sync queue worker: failed to settle row %d: %v", id, err)
 	}
+}
+
+// retryDelay computes the backoff for a given retry count. Audit #23: the
+// undecodable-payload branch settles with the row's unchanged retryCount, which
+// is 0 for stranded 'pending' rows; the previous `baseRetryDelay << (retryCount
+// - 1)` then shifted by -1 and panicked (killing the process). Clamp the shift
+// to [0, 16] so any non-negative or unexpected count yields a sane delay.
+func retryDelay(retryCount int) time.Duration {
+	shift := retryCount - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 16 {
+		shift = 16
+	}
+	return baseRetryDelay << shift
 }
 
 func truncateErr(msg string) string {

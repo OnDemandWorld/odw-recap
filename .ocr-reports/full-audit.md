@@ -21,7 +21,7 @@ Toolchain: cargo/rustc 1.96.0, Go 1.27.1, node 26.8.1, npm 11.19.0. clippy/rustf
 ## Summary
 
 - **Total findings:** 84  (High 4 / Medium 19 / Low 61)
-- **Remediation progress:** fixed 4 · skipped 0 · reverted 0 · open 80
+- **Remediation progress:** fixed 8 · skipped 1 · reverted 0 · open 75
 - **Source files in scope:** 91 · **Reviewed:** 91 · **Coverage:** 100%
 
 All four High-severity findings were independently re-verified against the cited source lines during consolidation (confirmed, not false positives). Documented known limitations (stub providers, audio-capture stubs, credentials-only encryption at rest, empty-passphrase dev fallback, legacy zero-salt, no code signing/auto-update, Tauri 1.4, E2E scaffolding) were excluded as new defects; extra concrete risks beyond them are noted at Low.
@@ -56,14 +56,15 @@ _Bugs, security issues, and data-loss risks — fix first._
   - **Suggested fix:** Remove middleware.RealIP unless the server is actually behind a trusted reverse proxy; if a proxy is used, only honor forwarded headers from configured trusted proxy CIDRs (and have the proxy strip client-supplied copies). Key the rate limiter on the true connection peer otherwise, and record the peer address in audit entries.
   - **Verification:** Removed the unconditional r.Use(middleware.RealIP) from Router(); clientKey now keys on the authoritative connection peer (r.RemoteAddr). Updated clientKey comment. Verified: `cd team-server && go test ./...` -> ok (incl. TestRealIP_SpoofedHeadersIgnored asserting audit ip stays 192.0.2.1 despite spoofed X-Forwarded-For/X-Real-IP/True-Client-IP); go vet 0; gofmt clean.
 
-## Medium (19) — 0 fixed
+## Medium (19) — 4 fixed
 
 _Performance, error-handling, and correctness gaps — schedule soon._
 
-- [ ] **#5** `bug` — CI branch filters miss the active development branch 'dev' entirely
+- [x] **#5** `bug` — CI branch filters miss the active development branch 'dev' entirely — **FIXED**
   - **Location:** `.github/workflows/ci.yml:3-7`
   - **Root cause:** on.push.branches and on.pull_request.branches are [master, main, develop]. The repository's actual branches are dev and master (git branch -a shows no develop or main; current branch and all recent work are on dev). Concrete failure: every push to dev and every PR targeting dev triggers zero CI jobs — Rust tests, Go tests and desktop builds never run on the branch where development actually happens, which is how contract regressions (e.g. the MeetingStatus casing bug) can land unnoticed. 'develop' appears to be a typo for 'dev'.
   - **Suggested fix:** Add 'dev' to both branch filters (or drop the filters / use a pattern that matches the real branching model). Verify a push to dev actually starts the workflow after the change.
+  - **Verification:** Added 'dev' to both on.push.branches and on.pull_request.branches. Verified: grep confirms both filters now [master, main, dev, develop]; YAML structure otherwise unchanged. A live CI trigger requires GitHub.
 
 - [ ] **#6** `security` — Authorization checked only after fully buffering up to 500 MiB of unauthenticated multipart body
   - **Location:** `desktop-app/src-tauri/src/audio_input/http_upload_server.rs:147-201`
@@ -135,25 +136,29 @@ _Performance, error-handling, and correctness gaps — schedule soon._
   - **Root cause:** start_watch_folder persists watch_folder_enabled=true and watch_folder_path (main.rs:229-233, comment R-15 claims 'persist the watch folder so it survives restarts'), and stop_watch_folder writes enabled=false. But nothing ever reads those keys back: main() in main.rs never auto-starts a watch, AudioInputManager::new does not take config, and the frontend init()/restoreSettings() only restores stt/llm providers, API-key hints and team-server status — it never reads watch_folder_path/watch_folder_enabled nor calls start_watch_folder, and #watch-folder-path stays empty. Concrete failure: user picks a watch folder, restarts the app, and new recordings are silently no longer auto-imported even though the setting was 'saved'; the UI gives no indication the watch is inactive.
   - **Suggested fix:** On startup (either in Rust main() after state construction, or in the frontend restoreSettings), read watch_folder_enabled/watch_folder_path via get_config; if enabled and the path is still a directory, call start_watch_folder and populate #watch-folder-path (and reflect active state via watch_folder_status). If the folder no longer exists, surface a status message instead of silently doing nothing.
 
-- [ ] **#20** `bug` — package.sh never copies desktop bundles: artifact paths resolved from team-server/ and all errors suppressed
+- [x] **#20** `bug` — package.sh never copies desktop bundles: artifact paths resolved from team-server/ and all errors suppressed — **FIXED**
   - **Location:** `scripts/package.sh:20-36`
   - **Root cause:** Line 20 does 'cd ../team-server', so from line 27 onward the CWD is team-server/. Every desktop artifact path ('src-tauri/target/release/bundle/dmg/*.dmg', '.../macos/*.app', '.../deb/*.deb', '.../appimage/*.AppImage', '.../msi/*.msi', '.../nsis/*.exe') is relative and resolves to team-server/src-tauri/... which does not exist (the bundles are under desktop-app/src-tauri/target/release/bundle). Each cp is wrapped in '2>/dev/null || true', so all six copies fail silently on every platform, dist/ ends up containing only the Go server binary, and the script still prints 'Packaging complete! Artifacts in dist/'. A release cut with this script ships no desktop app at all.
   - **Suggested fix:** Reference the bundles from the repo root (e.g. ../desktop-app/src-tauri/target/release/bundle/... after the cd, or cd back to the root before copying). Remove '2>/dev/null || true' or replace it with an explicit existence check that fails loudly when the expected bundle for the current platform is missing. Also adopt set -euo pipefail and script-relative cd (cd "$(dirname "$0")/..").
+  - **Verification:** Rewrote package.sh: anchor to repo root (cd "$(dirname "$0")/.."), set -euo pipefail, reference desktop bundles via $ROOT/desktop-app/src-tauri/target/release/bundle (previously resolved under team-server/), and removed '2>/dev/null || true' so a missing platform bundle fails loudly instead of shipping only the Go binary. Verified: bash -n scripts/package.sh -> syntax OK. A full packaging run requires a Tauri release build (not executed in baseline).
 
-- [ ] **#21** `security` — TOCTOU race in first-account-becomes-admin bootstrap can create multiple admins
+- [x] **#21** `security` — TOCTOU race in first-account-becomes-admin bootstrap can create multiple admins — **FIXED**
   - **Location:** `team-server/internal/api/auth_handlers.go:100-120`
   - **Root cause:** registerHandler reads SELECT COUNT(*) FROM users (line 102) and, if zero, sets role='admin' before a separate INSERT (lines 117-120), with no transaction, lock, or uniqueness constraint. Two concurrent registrations against an empty users table both observe count==0 and both insert with role='admin'. On a fresh deployment an attacker who races the operator's first registration (or simply fires parallel requests) obtains an admin account with cross-tenant access to all meetings, /admin/users and /admin/audit-log.
   - **Suggested fix:** Make the bootstrap atomic: e.g. INSERT ... SELECT ... WHERE NOT EXISTS (SELECT 1 FROM users) returning the role, a pg_advisory_xact_lock around count+insert, or a unique partial index / dedicated bootstrap step that guarantees exactly one admin is ever created this way.
+  - **Verification:** registerHandler first-admin bootstrap now runs COUNT+INSERT inside a transaction guarded by pg_advisory_xact_lock(bootstrapAdminLock), serializing concurrent registrations so exactly one admin is created. Verified: cd team-server && go vet ./... -> 0; go test ./... -> ok (no new failures); gofmt clean. A live concurrency regression test requires PostgreSQL (the baseline api test harness is DB-less).
 
-- [ ] **#22** `bug` — Retries after a partial sync failure re-upload to Vault, duplicating knowledge documents
+- [ ] **#22** `bug` — Retries after a partial sync failure re-upload to Vault, duplicating knowledge documents — **SKIPPED**
   - **Location:** `team-server/internal/sync/forwarder.go:161-186`
   - **Root cause:** ProcessSync returns errors.Join(vaultErr, loopErr) with no per-target success state. When Vault succeeds but Loop fails (e.g. Loop down, action items present), syncHandler settles the queue row as 'failed' (sync_handlers.go:160) and QueueWorker.forwardRow later re-runs the FULL ProcessSync (worker.go:168), calling ForwardToVault again. Each retry (up to 5) uploads the same Markdown document again; the comment in cmd/server/main.go:145-148 confirms retries were already observed to duplicate Vault documents. The same duplication occurs if the handler's settleQueue write fails and the row stays 'pending' past stalePendingAfter after a successful inline forward.
   - **Suggested fix:** Track per-target completion (e.g. vault_done/loop_done flags on sync_queue or in the payload) and retry only the failed target; alternatively send a deterministic idempotency key / document id derived from meeting_id+action so Vault can deduplicate re-uploads.
+  - **Verification:** Skipped (out of minimal scope): a correct fix needs per-target completion state (a sync_queue schema migration adding vault_done/loop_done) or a Vault-side idempotency-key contract so retries skip already-succeeded targets. ProcessSync is stateless across retries, so neither is achievable as a small, strictly-scoped edit, and it cannot be safely regression-tested without live Vault + PostgreSQL. Recommended follow-up: add per-target flags to sync_queue and retry only the failed target, or send a deterministic idempotency key derived from meeting_id+action.
 
-- [ ] **#23** `bug` — Negative shift amount in retry backoff panics and crashes the whole server when an undecodable row has retry_count=0
+- [x] **#23** `bug` — Negative shift amount in retry backoff panics and crashes the whole server when an undecodable row has retry_count=0 — **FIXED**
   - **Location:** `team-server/internal/sync/worker.go:191-197`
   - **Root cause:** settle computes delay := baseRetryDelay << (retryCount - 1) (line 193). Go panics at run time on a negative shift count. forwardRow's undecodable-payload branch (lines 154-158) calls settle with status='failed' and row.retryCount UNCHANGED, which is 0 for stranded 'pending' rows (the exact rows this branch is meant to handle). The worker goroutine (Start, lines 54-68) has no recover, so the panic kills the entire process, not just the worker. Today the handler always inserts well-formed payloads, so the path requires a malformed/type-mismatched payload written directly to sync_queue (manual SQL, migration, or a future payload-shape change) — but the defensive branch that exists to handle bad rows is itself a process-wide crash.
   - **Suggested fix:** Clamp the shift (treat retryCount<1 as 1, or increment retry_count before settling the undecodable case), and add a recover guard around the worker loop so a single bad row can never take down the server.
+  - **Verification:** Added retryDelay(retryCount) helper clamping the backoff shift to [0,16] (used by settle), eliminating the negative-shift panic for retryCount=0 stranded rows; added a recover guard in processOnce so one malformed row cannot crash the process. Verified: go test ./internal/sync/ -run TestRetryDelay -> PASS (TestRetryDelay_ClampsNonPositiveCounts, TestRetryDelay_CapsLargeCounts); go test ./... -> ok; go vet 0; gofmt clean.
 
 ## Low (61) — 0 fixed
 
