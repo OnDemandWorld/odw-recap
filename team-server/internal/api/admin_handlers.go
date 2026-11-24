@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -35,7 +36,7 @@ func adminPagination(r *http.Request) (limit, offset int) {
 
 func (s *Server) adminListUsersHandler(w http.ResponseWriter, r *http.Request) {
 	limit, offset := adminPagination(r)
-	rows, err := s.db.DB().Query(
+	rows, err := s.db.DB().QueryContext(r.Context(),
 		"SELECT id, email, name, role, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2",
 		limit, offset,
 	)
@@ -64,7 +65,7 @@ func (s *Server) adminListUsersHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminAuditLogHandler(w http.ResponseWriter, r *http.Request) {
 	limit, offset := adminPagination(r)
-	rows, err := s.db.DB().Query(
+	rows, err := s.db.DB().QueryContext(r.Context(),
 		"SELECT id, user_id, action, resource_type, resource_id, details, ip_address, user_agent, created_at FROM audit_log ORDER BY created_at DESC LIMIT $1 OFFSET $2",
 		limit, offset,
 	)
@@ -111,16 +112,17 @@ var adminStatsTables = []struct {
 func (s *Server) adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	stats := make(map[string]interface{}, len(adminStatsTables))
 	for _, stat := range adminStatsTables {
-		stats[stat.name] = s.count(stat.table)
+		stats[stat.name] = s.count(r.Context(), stat.table)
 	}
 
 	respondJSON(w, http.StatusOK, stats)
 }
 
-func (s *Server) count(table string) int {
+func (s *Server) count(ctx context.Context, table string) int {
 	var count int
 	// table always comes from adminStatsTables, never from request input.
-	row := s.db.DB().QueryRow("SELECT COUNT(*) FROM " + table)
+	// Audit #73: honor the request context so timeouts/disconnects cancel it.
+	row := s.db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table)
 	if err := row.Scan(&count); err != nil {
 		return 0
 	}

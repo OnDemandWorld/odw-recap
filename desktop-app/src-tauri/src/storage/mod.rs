@@ -40,11 +40,21 @@ fn load_or_create_salt(data_dir: &Path) -> Result<[u8; 32]> {
             salt.copy_from_slice(&bytes);
             return Ok(salt);
         }
-        return Err(RecapError::Encryption(format!(
-            "Corrupted salt file at {}: expected 32 bytes, found {}",
+        // Audit #49: a corrupt salt file previously made StorageManager::new
+        // fail and main() .expect() panic before any window existed (invisible
+        // on Windows release builds). Quarantine it and create a fresh salt so
+        // the app can launch; previously saved API keys must be re-entered.
+        eprintln!(
+            "WARNING: corrupted salt file at {} (expected 32 bytes, found {}); \
+             quarantining to salt.bin.corrupt and creating a fresh salt. \
+             Previously saved API keys can no longer be decrypted and must be re-saved.",
             salt_path.display(),
             bytes.len()
-        )));
+        );
+        let _ = std::fs::rename(&salt_path, data_dir.join("salt.bin.corrupt"));
+        let salt = EncryptionManager::generate_salt();
+        write_salt_atomic(&salt_path, &salt)?;
+        return Ok(salt);
     }
 
     // No salt file — decide between fresh install (new random salt) and
@@ -61,8 +71,17 @@ fn load_or_create_salt(data_dir: &Path) -> Result<[u8; 32]> {
     }
 
     let salt = EncryptionManager::generate_salt();
-    std::fs::write(&salt_path, salt)?;
+    write_salt_atomic(&salt_path, &salt)?;
     Ok(salt)
+}
+
+/// Write the salt via a temp file + rename so a crash mid-write cannot leave a
+/// partial (corrupt) salt.bin (audit #49).
+fn write_salt_atomic(salt_path: &Path, salt: &[u8; 32]) -> Result<()> {
+    let tmp = salt_path.with_extension("bin.tmp");
+    std::fs::write(&tmp, salt)?;
+    std::fs::rename(&tmp, salt_path)?;
+    Ok(())
 }
 
 impl StorageManager {
@@ -103,11 +122,14 @@ impl StorageManager {
         })
     }
 
-    pub fn change_passphrase(&self, new_passphrase: &str) -> Result<()> {
-        let new_key = self.encryption.derive_key(new_passphrase)?;
-        // In a full implementation, we would re-encrypt all existing data here
-        // For now, we just re-derive and update the in-memory key
-        self.encryption.replace_key(new_key)
+    pub fn change_passphrase(&self, _new_passphrase: &str) -> Result<()> {
+        // Audit #14: swapping the in-memory key without re-encrypting stored
+        // data permanently bricks every saved API key (they were encrypted with
+        // the old key, which is then discarded). Until full re-encryption is
+        // implemented, refuse the operation instead of destroying credentials.
+        Err(RecapError::Encryption(
+            "change_passphrase is not implemented: stored data must be re-encrypted with the new key first; refusing to swap the key and lose saved API keys".to_string(),
+        ))
     }
 
     pub fn get_data_dir(&self) -> &Path {
@@ -139,12 +161,44 @@ impl StorageManager {
         self.db.update_meeting(meeting)
     }
 
+    pub fn update_sync_status(&self, id: Uuid, sync_status: &SyncStatus) -> Result<()> {
+        self.db.update_sync_status(id, sync_status)
+    }
+
     pub fn list_meetings(&self, limit: i64, offset: i64) -> Result<Vec<Meeting>> {
         self.db.list_meetings(limit, offset)
     }
 
     pub fn delete_meeting(&self, id: Uuid) -> Result<()> {
-        self.db.delete_meeting(id)
+        // Audit #12: a privacy-first delete must erase the recording too, not
+        // just the DB rows. Capture the audio path before deleting, then remove
+        // the file — but only when it lives inside the managed data directory.
+        let audio_path = self.db.get_meeting(id)?.map(|m| m.audio_file_path);
+        self.db.delete_meeting(id)?;
+        if let Some(path) = audio_path {
+            self.remove_managed_audio(&path);
+        }
+        Ok(())
+    }
+
+    /// Best-effort removal of a meeting audio file, confined to the data dir so
+    /// a crafted audio_file_path can never delete an arbitrary file.
+    fn remove_managed_audio(&self, path: &Path) {
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(_) => return, // already gone / unreadable — nothing to remove
+        };
+        let data_dir = match std::fs::canonicalize(&self.data_dir) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if canonical.starts_with(&data_dir) {
+            if let Err(e) = std::fs::remove_file(&canonical) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("delete_meeting: failed to remove audio {}: {}", canonical.display(), e);
+                }
+            }
+        }
     }
 
     pub fn search_transcripts(&self, query: &str, limit: i64) -> Result<Vec<(Uuid, String)>> {

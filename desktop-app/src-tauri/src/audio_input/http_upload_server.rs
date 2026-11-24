@@ -1,13 +1,13 @@
 use crate::error::{RecapError, Result};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Query, State},
+    http::StatusCode,
     response::{Html, IntoResponse, Json},
     routing::{get, post},
     Router,
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -69,7 +69,11 @@ impl HttpUploadServer {
     /// Bind and serve until the task is aborted. Runs on the caller's async
     /// runtime (tauri::async_runtime::spawn) — failures are returned, never
     /// unwrapped, so a busy port surfaces as an error instead of a panic.
-    pub async fn run(self) -> Result<()> {
+    /// Serve on an already-bound listener. Audit #9: the caller binds the
+    /// socket synchronously so a busy port surfaces as an error from
+    /// start_http_server instead of being logged inside a detached task while
+    /// the UI shows a URL for a server that never started.
+    pub async fn run_with_listener(self, listener: tokio::net::TcpListener) -> Result<()> {
         let state = UploadState {
             inbox_path: self.inbox_path,
             token: self.token,
@@ -84,13 +88,6 @@ impl HttpUploadServer {
             .route("/upload/audio", get(upload_page).post(upload_audio))
             .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
             .with_state(state);
-
-        // 0.0.0.0 is intentional: the whole feature is "upload from another
-        // device on the local network". Access is gated by the token.
-        let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| RecapError::AudioInput(format!("Failed to bind HTTP server: {}", e)))?;
 
         axum::serve(listener, app)
             .await
@@ -134,14 +131,28 @@ impl HttpUploadServer {
 /// Authorize the request: token must be present either as the `token` query
 /// parameter or the `X-Upload-Token` header.
 fn authorized(query: &HashMap<String, String>, headers: &axum::http::HeaderMap, token: &str) -> bool {
-    if query.get("token").map(String::as_str) == Some(token) {
+    if query.get("token").map(|t| ct_eq(t.as_bytes(), token.as_bytes())).unwrap_or(false) {
         return true;
     }
     headers
         .get("X-Upload-Token")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v == token)
+        .map(|v| ct_eq(v.as_bytes(), token.as_bytes()))
         .unwrap_or(false)
+}
+
+/// Audit #33: constant-time byte comparison so token matching does not leak a
+/// prefix-match timing side channel on the unauthenticated LAN service. Length
+/// is compared first (the token length is fixed/public).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 async fn upload_audio(
@@ -150,38 +161,58 @@ async fn upload_audio(
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    // NOTE: the browser upload page posts the token as a multipart form
-    // field, so the final authorization verdict runs after parsing below.
+    // Audit #6: authorize BEFORE buffering the file body (up to 500 MiB).
+    // Previously the whole multipart was buffered and only then checked, so an
+    // unauthenticated LAN device could exhaust memory with concurrent large
+    // bodies. Query/header token is checked up front; the browser form posts
+    // the token as its first field, so we validate it on arrival and refuse to
+    // read any file bytes until authorized.
+    let mut pre_authorized = authorized(&query, &headers, &state.token);
 
     let mut file_data: Option<Result<Vec<u8>>> = None;
     let mut ext = "m4a".to_string();
-    let mut form_token = String::new();
 
     // Multipart errors are surfaced (previously .ok() swallowed them into a
-    // misleading "No file provided"). Stream field bytes rather than
-    // buffering: multipart errors propagate with their real cause.
+    // misleading "No file provided").
     while let Some(field) = match multipart.next_field().await {
         Ok(f) => f,
         Err(e) => {
-            return Json(json!({
+            return (StatusCode::BAD_REQUEST, Json(json!({
                 "status": "error",
                 "message": format!("Malformed multipart upload: {}", e)
-            }));
+            })));
         }
     } {
         let name = field.name().unwrap_or("").to_string();
         if name == "token" {
             if let Ok(value) = field.text().await {
-                form_token = value;
+                if ct_eq(value.as_bytes(), state.token.as_bytes()) {
+                    pre_authorized = true;
+                } else if !pre_authorized {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({
+                        "status": "error",
+                        "message": "Invalid or missing upload token"
+                    })));
+                }
             }
             continue;
         }
         if name == "file" {
+            if !pre_authorized {
+                // Reject before allocating the body — no unauthenticated buffering.
+                return (StatusCode::UNAUTHORIZED, Json(json!({
+                    "status": "error",
+                    "message": "Invalid or missing upload token"
+                })));
+            }
             let filename = field.file_name().unwrap_or("recording.m4a").to_string();
+            // Audit #34: do not default a missing extension to m4a — that let an
+            // extension-less part bypass the allowlist. An empty ext fails the
+            // SUPPORTED_EXTENSIONS check below.
             ext = PathBuf::from(&filename)
                 .extension()
                 .and_then(|e| e.to_str())
-                .unwrap_or("m4a")
+                .unwrap_or("")
                 .to_ascii_lowercase();
             file_data = Some(
                 field
@@ -193,48 +224,48 @@ async fn upload_audio(
         }
     }
 
-    if !authorized(&query, &headers, &state.token) && form_token != state.token {
-        return Json(json!({
+    if !pre_authorized {
+        return (StatusCode::UNAUTHORIZED, Json(json!({
             "status": "error",
             "message": "Invalid or missing upload token"
-        }));
+        })));
     }
 
     let data = match file_data {
         Some(Ok(data)) => data,
         Some(Err(e)) => {
-            return Json(json!({
+            return (StatusCode::BAD_REQUEST, Json(json!({
                 "status": "error",
                 "message": format!("{}", e)
-            }));
+            })));
         }
         None => {
-            return Json(json!({
+            return (StatusCode::BAD_REQUEST, Json(json!({
                 "status": "error",
                 "message": "No file provided"
-            }));
+            })));
         }
     };
 
     // R-2: reject unsupported extensions up front.
     if !SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-        return Json(json!({
+        return (StatusCode::BAD_REQUEST, Json(json!({
             "status": "error",
             "message": format!(
                 "Unsupported file type '.{}'. Supported: {}",
                 ext,
                 SUPPORTED_EXTENSIONS.join(", ")
             )
-        }));
+        })));
     }
 
     let uuid = Uuid::new_v4();
     let path = state.inbox_path.join(format!("{}.{}", uuid, ext));
     if let Err(e) = tokio::fs::write(&path, &data).await {
-        return Json(json!({
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
             "status": "error",
             "message": format!("Failed to save file: {}", e)
-        }));
+        })));
     }
 
     // R-2: create the REAL library meeting so the upload shows up in Recap and
@@ -251,16 +282,21 @@ async fn upload_audio(
         &state.llm_provider,
     );
     match meeting_result {
-        Ok(meeting_id) => Json(json!({
+        Ok(meeting_id) => (StatusCode::OK, Json(json!({
             "status": "uploaded",
             "meeting_id": meeting_id,
             "message": "Uploaded — the meeting now appears in your Recap library.",
             "path": path.to_string_lossy().to_string()
-        })),
-        Err(e) => Json(json!({
-            "status": "error",
-            "message": format!("File saved but library registration failed: {}", e)
-        })),
+        }))),
+        Err(e) => {
+            // Audit #35: registration failed — remove the written file so it does
+            // not orphan in the inbox with no meeting row, and report a 500.
+            let _ = tokio::fs::remove_file(&path).await;
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "status": "error",
+                "message": format!("Library registration failed (upload discarded): {}", e)
+            })))
+        }
     }
 }
 
@@ -270,7 +306,33 @@ async fn upload_page(
     Query(query): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let token = query.get("token").cloned().unwrap_or_default();
-    Html(format!(
+    Html(upload_page_html(&token))
+}
+
+/// Escape the five HTML-significant characters so attacker-controlled text
+/// (the `token` query parameter is reflected into an attribute) cannot break
+/// out of its context. Audit #1: the raw token was previously interpolated
+/// unescaped, giving unauthenticated reflected XSS on the LAN-bound service.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Pure renderer for the upload page, separated from the axum handler so the
+/// escaping can be unit-tested. The token is HTML-escaped before interpolation.
+fn upload_page_html(token: &str) -> String {
+    let token = html_escape(token);
+    format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ODW Recap — Upload recording</title>
@@ -283,5 +345,36 @@ button{{width:100%;padding:.9rem;font-size:1rem;margin-top:1rem}}</style></head>
 <input type="file" name="file" accept=".m4a,.wav,.mp3,.ogg,.webm,.flac" required style="width:100%;padding:.6rem">
 <button type="submit">Upload</button>
 </form></body></html>"#
-    ))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression for audit #1: a malicious token must not be able to inject
+    // markup/script into the reflected upload page.
+    #[test]
+    fn upload_page_escapes_hostile_token() {
+        let evil = "\"><script>alert(1)</script>";
+        let html = upload_page_html(evil);
+        assert!(!html.contains("<script>alert(1)</script>"), "raw script leaked: {}", html);
+        assert!(!html.contains("\"><script>"), "attribute breakout leaked");
+        assert!(html.contains("&quot;&gt;&lt;script&gt;"), "token not escaped: {}", html);
+    }
+
+    #[test]
+    fn html_escape_covers_all_special_chars() {
+        assert_eq!(html_escape("&<>\"'"), "&amp;&lt;&gt;&quot;&#x27;");
+        assert_eq!(html_escape("plain-token-123"), "plain-token-123");
+    }
+
+    // Audit #33: constant-time token equality behaves correctly.
+    #[test]
+    fn ct_eq_matches_only_identical_tokens() {
+        assert!(ct_eq(b"abc-123", b"abc-123"));
+        assert!(!ct_eq(b"abc-123", b"abc-124"));
+        assert!(!ct_eq(b"abc", b"abcd"));
+        assert!(ct_eq(b"", b""));
+    }
 }

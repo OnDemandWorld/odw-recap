@@ -96,7 +96,9 @@ func (f *Forwarder) ForwardToVault(ctx context.Context, meetingTitle, markdownBo
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	// Audit #83: cap the upstream body so a misbehaving Vault cannot exhaust
+	// memory (the body is also embedded into errors / last_error).
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("vault upload returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -147,7 +149,7 @@ func (f *Forwarder) ForwardToLoop(ctx context.Context, payload map[string]any) e
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("loop webhook returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 

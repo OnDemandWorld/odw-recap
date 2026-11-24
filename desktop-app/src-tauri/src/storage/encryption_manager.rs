@@ -6,10 +6,13 @@ use aes_gcm::{
 use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 use rand::{Rng, rngs::OsRng};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 #[derive(Clone)]
 pub struct EncryptionManager {
-    master_key: Arc<Mutex<Option<[u8; 32]>>>,
+    // Audit #46: Zeroizing wipes the key on drop so it does not linger in freed
+    // heap memory (core dumps / swap / memory scraping).
+    master_key: Arc<Mutex<Option<Zeroizing<[u8; 32]>>>>,
     salt: [u8; 32],
 }
 
@@ -28,7 +31,7 @@ impl EncryptionManager {
         }
     }
 
-    pub fn derive_key(&self, passphrase: &str) -> Result<[u8; 32]> {
+    pub fn derive_key(&self, passphrase: &str) -> Result<Zeroizing<[u8; 32]>> {
         let salt_string = SaltString::encode_b64(&self.salt)
             .map_err(|e| RecapError::Encryption(e.to_string()))?;
 
@@ -41,9 +44,18 @@ impl EncryptionManager {
             RecapError::Encryption("Failed to derive key hash".to_string())
         })?;
 
-        let mut key = [0u8; 32];
         let hash_bytes = hash.as_bytes();
-        key.copy_from_slice(&hash_bytes[..32.min(hash_bytes.len())]);
+        // Audit #47: the old `copy_from_slice(&hash_bytes[..32.min(len)])`
+        // panicked whenever the output was not exactly 32 bytes. Validate the
+        // length and return an error instead (Argon2::default() yields 32).
+        if hash_bytes.len() != 32 {
+            return Err(RecapError::Encryption(format!(
+                "unexpected derived key length: {} (expected 32)",
+                hash_bytes.len()
+            )));
+        }
+        let mut key = Zeroizing::new([0u8; 32]);
+        key.copy_from_slice(hash_bytes);
 
         Ok(key)
     }
@@ -64,11 +76,15 @@ impl EncryptionManager {
             .unwrap_or(false)
     }
 
+    // Retained for the future passphrase re-encryption flow. change_passphrase
+    // currently refuses (audit #14) rather than swap the key and brick stored
+    // data, so this has no caller yet.
+    #[allow(dead_code)]
     pub fn replace_key(&self, new_key: [u8; 32]) -> Result<()> {
         let mut guard = self.master_key.lock().map_err(|_| {
             RecapError::Encryption("Failed to lock master key".to_string())
         })?;
-        *guard = Some(new_key);
+        *guard = Some(Zeroizing::new(new_key));
         Ok(())
     }
 
@@ -81,7 +97,7 @@ impl EncryptionManager {
             RecapError::Encryption("Encryption manager not unlocked".to_string())
         })?;
 
-        let cipher = Aes256Gcm::new_from_slice(key)
+        let cipher = Aes256Gcm::new_from_slice(&**key)
             .map_err(|e| RecapError::Encryption(e.to_string()))?;
 
         let mut iv = [0u8; 12];
@@ -112,7 +128,7 @@ impl EncryptionManager {
             RecapError::Encryption("Encryption manager not unlocked".to_string())
         })?;
 
-        let cipher = Aes256Gcm::new_from_slice(key)
+        let cipher = Aes256Gcm::new_from_slice(&**key)
             .map_err(|e| RecapError::Encryption(e.to_string()))?;
 
         let iv = &ciphertext[..12];

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -42,6 +43,13 @@ func NewDatabase(dsn string) (*Database, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+
+	// Audit #81: bound the pool. database/sql defaults allow unlimited open
+	// connections (a load spike can exhaust PostgreSQL max_connections) while
+	// keeping only 2 idle (constant connect churn under concurrency).
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Test connection
 	if err := db.Ping(); err != nil {

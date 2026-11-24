@@ -9,7 +9,7 @@ pub fn substitute_variables(template: &str, variables: &HashMap<String, String>)
     let mut in_variable = false;
 
     while let Some(c) = chars.next() {
-        if c == '{' && chars.peek() == Some(&'{') {
+        if c == '{' && chars.peek() == Some(&'{') && !in_variable {
             chars.next(); // consume second {
             in_variable = true;
             current_var.clear();
@@ -29,6 +29,14 @@ pub fn substitute_variables(template: &str, variables: &HashMap<String, String>)
         } else {
             result.push(c);
         }
+    }
+
+    // Audit #45: an unclosed placeholder at end-of-input previously dropped all
+    // text from '{{' onward. Emit the consumed text literally instead of
+    // silently deleting it.
+    if in_variable {
+        result.push_str("{{");
+        result.push_str(&current_var);
     }
 
     Ok(result)
@@ -66,5 +74,13 @@ mod tests {
 
         let result = substitute_variables(template, &variables).unwrap();
         assert_eq!(result, "test and test again");
+    }
+
+    // Audit #45: an unclosed placeholder must not silently delete trailing text.
+    #[test]
+    fn test_unclosed_placeholder_preserves_text() {
+        let template = "Summarize: {{transcript";
+        let result = substitute_variables(template, &HashMap::new()).unwrap();
+        assert_eq!(result, "Summarize: {{transcript");
     }
 }

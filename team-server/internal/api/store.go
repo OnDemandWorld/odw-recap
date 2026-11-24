@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -160,7 +161,10 @@ func (s *Server) writeAudit(r *http.Request, user *models.User, action string, r
 	}
 
 	resourceType := "meeting"
-	ip := r.RemoteAddr
+	// Audit #77: store only the host, not host:port — a full-form IPv6 peer
+	// ("[39-char addr]:port") exceeds audit_log.ip_address VARCHAR(45) and the
+	// INSERT would fail, silently dropping the audit row.
+	ip := clientIP(r.RemoteAddr)
 	userAgent := r.UserAgent()
 
 	var detailsStr *string
@@ -173,7 +177,10 @@ func (s *Server) writeAudit(r *http.Request, user *models.User, action string, r
 		}
 	}
 
-	s.audit.Log(r.Context(), &models.AuditLog{
+	// Audit #78: the mutation has already committed; use a non-cancellable
+	// context so a client disconnect or the request timeout cannot drop the
+	// audit record for a completed, security-relevant action.
+	s.audit.Log(context.WithoutCancel(r.Context()), &models.AuditLog{
 		UserID:       &user.ID,
 		Action:       action,
 		ResourceType: &resourceType,
@@ -183,4 +190,14 @@ func (s *Server) writeAudit(r *http.Request, user *models.User, action string, r
 		UserAgent:    &userAgent,
 		CreatedAt:    time.Now(),
 	})
+}
+
+// clientIP extracts the host from a RemoteAddr ("host:port"), returning the
+// input unchanged when it has no parseable port. Keeps audit ip_address within
+// VARCHAR(45) even for full-form IPv6 peers (audit #77).
+func clientIP(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
 }

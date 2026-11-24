@@ -209,4 +209,137 @@ mod tests {
         let beta = templates.iter().find(|(n, _, _)| n == "beta").unwrap();
         assert!(beta.2); // is_custom
     }
+
+    // Audit #12: deleting a meeting must also erase its audio file when the file
+    // lives inside the managed data directory.
+    #[test]
+    fn test_delete_meeting_removes_audio_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        let audio_path = temp_dir.path().join("recording.m4a");
+        std::fs::write(&audio_path, b"fake audio bytes").unwrap();
+
+        let mut meeting = create_test_meeting();
+        meeting.audio_file_path = audio_path.clone();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+        assert!(audio_path.exists());
+
+        storage.delete_meeting(id).unwrap();
+        assert!(storage.get_meeting(id).unwrap().is_none());
+        assert!(!audio_path.exists(), "audio file must be removed on delete");
+    }
+
+    // Audit #12: a path outside the data dir must never be deleted.
+    #[test]
+    fn test_delete_meeting_does_not_touch_external_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+
+        let outside = TempDir::new().unwrap();
+        let external_file = outside.path().join("keep.m4a");
+        std::fs::write(&external_file, b"do not delete").unwrap();
+
+        let mut meeting = create_test_meeting();
+        meeting.audio_file_path = external_file.clone();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+
+        storage.delete_meeting(id).unwrap();
+        assert!(external_file.exists(), "file outside data dir must be preserved");
+    }
+
+    // Audit #13: update_sync_status changes only sync_status, leaving every other
+    // column intact (no stale-snapshot clobber).
+    #[test]
+    fn test_update_sync_status_only_touches_sync_status() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+        let meeting = create_test_meeting();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+
+        storage.update_sync_status(id, &SyncStatus::Synced).unwrap();
+        let after = storage.get_meeting(id).unwrap().unwrap();
+        assert!(matches!(after.sync_status, SyncStatus::Synced));
+        assert_eq!(after.title, Some("Test Meeting".to_string()));
+        assert!(matches!(after.status, MeetingStatus::Completed));
+        assert_eq!(after.language, "en");
+        assert_eq!(after.participants.len(), 2);
+    }
+
+    // Audit #14: change_passphrase must refuse rather than brick stored keys.
+    #[test]
+    fn test_change_passphrase_refuses_unimplemented() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "test-passphrase").unwrap();
+        storage.save_api_key("openai", "sk-secret").unwrap();
+
+        assert!(storage.change_passphrase("a-new-passphrase").is_err());
+        // The original key must still decrypt (key was not swapped).
+        assert_eq!(storage.get_api_key("openai").unwrap(), Some("sk-secret".to_string()));
+    }
+
+    // Audit #49: a corrupt salt.bin must not panic startup — it is quarantined
+    // and a fresh 32-byte salt is created so the app can launch.
+    #[test]
+    fn test_corrupt_salt_recovers() {
+        let temp_dir = TempDir::new().unwrap();
+        let salt_path = temp_dir.path().join("salt.bin");
+        std::fs::write(&salt_path, b"too-short").unwrap(); // 9 bytes, not 32
+
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "pass");
+        assert!(storage.is_ok(), "corrupt salt must not prevent startup");
+
+        assert!(temp_dir.path().join("salt.bin.corrupt").exists(), "old salt quarantined");
+        let new_salt = std::fs::read(&salt_path).unwrap();
+        assert_eq!(new_salt.len(), 32, "fresh salt must be 32 bytes");
+    }
+
+    fn segment(meeting_id: Uuid, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            id: 0,
+            meeting_id,
+            start_ms: 0,
+            end_ms: 1000,
+            text: text.to_string(),
+            speaker_id: None,
+            confidence: 0.9,
+            is_final: true,
+            version: 1,
+        }
+    }
+
+    // Audit #50: punctuation in a search query must not raise an FTS5 syntax error.
+    #[test]
+    fn test_search_with_punctuation_does_not_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "pass").unwrap();
+        let meeting = create_test_meeting();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+        storage.save_transcript_segments(id, &[segment(id, "budget Q3 review")]).unwrap();
+
+        for q in ["budget \"Q3\"", "call (John", "NEAR", "a & b | c"] {
+            assert!(storage.search_transcripts(q, 10).is_ok(), "query {:?} errored", q);
+        }
+        // A plain term still matches.
+        assert_eq!(storage.search_transcripts("budget", 10).unwrap().len(), 1);
+    }
+
+    // Audit #51: deleting a meeting purges its FTS index entries (no orphaned hits).
+    #[test]
+    fn test_delete_meeting_purges_fts() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageManager::new(temp_dir.path().to_path_buf(), "pass").unwrap();
+        let meeting = create_test_meeting();
+        let id = meeting.id;
+        storage.create_meeting(&meeting).unwrap();
+        storage.save_transcript_segments(id, &[segment(id, "zebra_unique_token")]).unwrap();
+        assert_eq!(storage.search_transcripts("zebra_unique_token", 10).unwrap().len(), 1);
+
+        storage.delete_meeting(id).unwrap();
+        assert!(storage.search_transcripts("zebra_unique_token", 10).unwrap().is_empty());
+    }
 }

@@ -21,7 +21,16 @@ impl WatchFolderMonitor {
 
         let mut watcher = notify::recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
-                if let notify::EventKind::Create(_) = event.kind {
+                // Audit #10: a file moved into the folder (Linux inotify
+                // MOVED_TO, or a sync client's temp-file-then-rename) arrives as
+                // Modify(Name), not Create — the old Create-only filter silently
+                // skipped the common `mv recording into watch folder` flow.
+                let import_candidate = matches!(event.kind, notify::EventKind::Create(_))
+                    || matches!(
+                        event.kind,
+                        notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    );
+                if import_candidate {
                     for path in event.paths {
                         let inbox = inbox_path.clone();
                         if path.starts_with(&inbox) {

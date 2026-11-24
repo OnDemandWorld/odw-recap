@@ -2,6 +2,7 @@ use crate::error::{RecapError, Result};
 use crate::storage::types::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub struct SqliteManager {
@@ -11,6 +12,11 @@ pub struct SqliteManager {
 impl SqliteManager {
     pub fn new(db_path: &PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
+        // Audit #15: StorageManager and ConfigManager open separate connections
+        // to recap.db under different mutexes. WAL permits only one writer at a
+        // time; without a busy_timeout the second writer fails immediately with
+        // "database is locked". Block briefly instead of erroring.
+        conn.busy_timeout(Duration::from_secs(5))?;
         let manager = Self { conn };
         manager.migrate()?;
         Ok(manager)
@@ -178,6 +184,15 @@ impl SqliteManager {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
+        // Audit #50: FTS5 interprets its MATCH argument as a query language, so
+        // raw user text with quotes/parentheses/operators (e.g. 'budget "Q3"')
+        // is a syntax error. Treat each whitespace-separated token as a literal
+        // phrase by double-quoting it (internal quotes doubled).
+        let fts_query = query
+            .split_whitespace()
+            .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" ");
         let mut stmt = self.conn.prepare(
             "SELECT m.id, highlight(transcript_search, 0, '【', '】')
              FROM transcript_search
@@ -189,7 +204,7 @@ impl SqliteManager {
         )?;
 
         let limit_str = limit.to_string();
-        let results = stmt.query_map([query, &limit_str], |row| {
+        let results = stmt.query_map([&fts_query, &limit_str], |row| {
             let id_str: String = row.get(0)?;
             let id = Uuid::parse_str(&id_str).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -261,7 +276,41 @@ impl SqliteManager {
     }
 
     pub fn delete_meeting(&self, id: Uuid) -> Result<()> {
-        self.conn.execute("DELETE FROM meetings WHERE id = ?1", params![id.to_string()])?;
+        // Audit #51: transcript_search is an external-content FTS5 table; the
+        // FK cascade deletes transcript_segments but never purges the index,
+        // leaving orphaned entries. Retire them before deleting the meeting.
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("SELECT id, text FROM transcript_segments WHERE meeting_id = ?1")?;
+            let old_rows: Vec<(i64, String)> = stmt
+                .query_map(params![id.to_string()], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (rowid, text) in old_rows {
+                tx.execute(
+                    "INSERT INTO transcript_search(transcript_search, rowid, text) VALUES('delete', ?1, ?2)",
+                    params![rowid, text],
+                )?;
+            }
+        }
+        tx.execute("DELETE FROM meetings WHERE id = ?1", params![id.to_string()])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Audit #13: update only the sync_status column (and updated_at) so a
+    /// long-running sync cannot clobber other fields with a stale snapshot.
+    pub fn update_sync_status(&self, id: Uuid, sync_status: &SyncStatus) -> Result<()> {
+        self.conn.execute(
+            "UPDATE meetings SET sync_status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                id.to_string(),
+                sync_status.to_string(),
+                chrono::Utc::now().timestamp_millis()
+            ],
+        )?;
         Ok(())
     }
 
@@ -282,13 +331,17 @@ impl SqliteManager {
                 let rows = stmt.query_map(params![meeting_id.to_string()], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })?;
-                rows.filter_map(|r| r.ok()).collect()
+                // Audit #52: propagate row-read errors (filter_map(|r| r.ok())
+                // silently skipped unreadable rows, leaving their FTS entries).
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
             for (rowid, text) in old_rows {
-                let _ = tx.execute(
+                // Audit #52: surface 'delete' command failures instead of let _ =
+                // which left the external-content index inconsistent.
+                tx.execute(
                     "INSERT INTO transcript_search(transcript_search, rowid, text) VALUES('delete', ?1, ?2)",
                     params![rowid, text],
-                );
+                )?;
             }
         }
         tx.execute("DELETE FROM transcript_segments WHERE meeting_id = ?1", params![meeting_id.to_string()])?;

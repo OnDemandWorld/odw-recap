@@ -303,6 +303,12 @@ fn save_api_key(provider: String, key: String, state: State<AppState>) -> Result
     if provider.trim().is_empty() {
         return Err(crate::error::RecapError::Config("Provider name is required".to_string()));
     }
+    // Audit #37: reject an empty key — storing an encrypted empty string made
+    // has_api_key true and produced a confusing remote 401 instead of the
+    // actionable "No API key saved" message.
+    if key.trim().is_empty() {
+        return Err(crate::error::RecapError::Config("API key is required".to_string()));
+    }
     let storage = lock_storage(&state)?;
     storage.save_api_key(provider.trim(), &key)
 }
@@ -507,7 +513,8 @@ fn main() {
     // RECAP_ENCRYPTION_PASSPHRASE is unset we fall back to an empty passphrase
     // and emit a loud warning — a documented development-only convenience, not
     // a production default. Production deployments MUST set the variable.
-    let encryption_passphrase =
+    // Audit #46: Zeroizing wipes the passphrase from memory after use.
+    let encryption_passphrase = zeroize::Zeroizing::new(
         std::env::var("RECAP_ENCRYPTION_PASSPHRASE").unwrap_or_else(|_| {
             eprintln!(
                 "WARNING: RECAP_ENCRYPTION_PASSPHRASE is not set; falling back to an \
@@ -515,7 +522,8 @@ fn main() {
                  protected by a meaningful encryption key."
             );
             String::new()
-        });
+        }),
+    );
 
     let storage = StorageManager::new(data_dir.clone(), &encryption_passphrase)
         .expect("Failed to initialize storage");
@@ -535,14 +543,17 @@ fn main() {
         inbox_path,
     );
 
+    // Audit #38: honor the persisted team-server URL at startup so the engine
+    // and the reported status agree after a restart (previously hardcoded to
+    // localhost until the next login reconfigured it).
+    let sync_server_url =
+        team_server_url(&config).unwrap_or_else(|_| TEAM_SERVER_URL_DEFAULT.to_string());
+
     let app_state = AppState {
         storage: app_storage,
         config: Arc::new(Mutex::new(config)),
         audio: Arc::new(Mutex::new(audio)),
-        sync: Arc::new(crate::sync::SyncEngine::new(
-            TEAM_SERVER_URL_DEFAULT.to_string(),
-            None,
-        )),
+        sync: Arc::new(crate::sync::SyncEngine::new(sync_server_url, None)),
     };
 
     tauri::Builder::default()
@@ -661,7 +672,7 @@ async fn sync_meeting_to_team_server(
 
     // Gather the payload from local storage, then release the lock before
     // any network I/O (locks must never span await points).
-    let (mut meeting, transcript, summary, action_items) = {
+    let (meeting, transcript, summary, action_items) = {
         let storage = lock_storage(&state)?;
         let meeting = storage
             .get_meeting(meeting_id)?
@@ -712,11 +723,13 @@ async fn sync_meeting_to_team_server(
         "action_items": action_items,
     });
 
-    // Persist the attempt before the network call.
-    meeting.sync_status = SyncStatus::Syncing;
+    // Persist the attempt before the network call. Audit #13: write only the
+    // sync_status column — a full update_meeting(&meeting) here would clobber
+    // any concurrent update (e.g. process_meeting completing) with this stale
+    // snapshot once the network call returns.
     {
         let storage = lock_storage(&state)?;
-        storage.update_meeting(&meeting)?;
+        storage.update_sync_status(meeting_id, &SyncStatus::Syncing)?;
     }
 
     let result = state
@@ -728,26 +741,27 @@ async fn sync_meeting_to_team_server(
         Ok(resp) => {
             let status = if resp.status == "synced" {
                 SyncStatus::Synced
-            } else if resp.status == "partial" {
-                // Forwarded with errors; the team-server queue worker retries.
+            } else if resp.status == "partial" || resp.status == "queued" {
+                // Audit #39: 'queued' (legacy queue-only mode) and 'partial'
+                // (forwarded with errors; the queue worker retries) are accepted
+                // in-progress outcomes, not failures. Previously 'queued' mapped
+                // to Failed.
                 SyncStatus::Syncing
             } else {
                 SyncStatus::Failed
             };
             let message = resp.message.clone();
             let status_str = resp.status.clone();
-            meeting.sync_status = status;
             {
                 let storage = lock_storage(&state)?;
-                storage.update_meeting(&meeting)?;
+                storage.update_sync_status(meeting_id, &status)?;
             }
             Ok(format!("{}: {}", status_str, message))
         }
         Err(e) => {
-            meeting.sync_status = SyncStatus::Failed;
             {
                 let storage = lock_storage(&state)?;
-                storage.update_meeting(&meeting)?;
+                storage.update_sync_status(meeting_id, &SyncStatus::Failed)?;
             }
             Err(e)
         }

@@ -49,11 +49,25 @@ impl SyncClient {
         Self {
             server_url: clean_base_url(&server_url),
             api_token,
+            // Audit #60: do not silently fall back to a no-timeout default if
+            // the builder fails — log it and re-apply the timeout.
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(|e| {
+                    eprintln!("sync: HTTP client builder failed ({}); retrying with timeout", e);
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_default()
+                }),
         }
+    }
+
+    /// The server this client targets (used to guard token installation across
+    /// a concurrent reconfigure — audit #61).
+    pub fn server_url(&self) -> &str {
+        &self.server_url
     }
 
     pub fn set_token(&mut self, token: Option<String>) {
@@ -143,6 +157,9 @@ impl SyncClient {
         // the failure instead of silently proceeding.
         let upsert_status = upsert.status();
         if !upsert_status.is_success() && upsert_status.as_u16() != 409 {
+            if upsert_status.as_u16() == 401 {
+                return Err(RecapError::SyncUnauthorized);
+            }
             let body = upsert.text().await.unwrap_or_default();
             return Err(RecapError::Sync(format!(
                 "meeting upsert failed (HTTP {}): {}",
@@ -174,6 +191,9 @@ impl SyncClient {
             .await
             .map_err(|e| RecapError::Sync(format!("sync response read failed: {}", e)))?;
         if !status.is_success() {
+            if status.as_u16() == 401 {
+                return Err(RecapError::SyncUnauthorized);
+            }
             return Err(RecapError::Sync(format!(
                 "sync failed (HTTP {}): {}",
                 status,

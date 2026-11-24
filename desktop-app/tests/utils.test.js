@@ -78,3 +78,22 @@ describe("statusLabel / isReady", () => {
     expect(utils.isReady("recording")).toBe(false);
   });
 });
+
+describe("parseConfigValue", () => {
+  test("decodes JSON-encoded settings written by the Rust set helper", () => {
+    expect(utils.parseConfigValue("true")).toBe(true);
+    expect(utils.parseConfigValue("false")).toBe(false);
+    expect(utils.parseConfigValue('"/recordings"')).toBe("/recordings");
+    expect(utils.parseConfigValue("8765")).toBe(8765);
+  });
+
+  test("falls back to the raw string for non-JSON (legacy) values", () => {
+    expect(utils.parseConfigValue("openai")).toBe("openai");
+    expect(utils.parseConfigValue("/plain/path")).toBe("/plain/path");
+  });
+
+  test("returns null for null/undefined", () => {
+    expect(utils.parseConfigValue(null)).toBeNull();
+    expect(utils.parseConfigValue(undefined)).toBeNull();
+  });
+});

@@ -21,6 +21,11 @@ import (
 // transcript/summary metadata (not audio), so a few MiB is generous.
 const maxJSONBodySize = 4 << 20 // 4 MiB
 
+// bootstrapAdminLock is a fixed advisory-lock key serializing the
+// first-account-becomes-admin bootstrap (audit #21) so two concurrent
+// registrations on an empty users table cannot both observe count==0.
+const bootstrapAdminLock int64 = 8675309
+
 // RegisterRequest represents a registration request
 type RegisterRequest struct {
 	Email    string `json:"email"`
@@ -65,6 +70,10 @@ func validateRegisterRequest(req *RegisterRequest) string {
 		return "Email, password, and name are required"
 	case !emailPattern.MatchString(req.Email):
 		return "Invalid email address"
+	case len(req.Email) > 255:
+		// Audit #74: users.email is VARCHAR(255); an over-length address would
+		// otherwise reach the INSERT and surface as a 500 (pq 22001), not a 400.
+		return "Email is too long"
 	case len(req.Name) > 255:
 		return "Name is too long"
 	case len(req.Password) < 8:
@@ -97,9 +106,27 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Create user. R-10: the FIRST account becomes admin — no role elevation
 	// endpoint exists, so without this /admin/* routes are unreachable without
 	// hand-written SQL.
+	//
+	// Audit #21: the count-then-insert bootstrap is a TOCTOU race — two
+	// concurrent registrations on an empty users table both saw count==0 and
+	// both became admin. Run the count+insert in one transaction guarded by a
+	// fixed advisory lock so the bootstrap is serialized and exactly one admin
+	// is ever created this way.
+	tx, err := s.db.DB().BeginTx(r.Context(), nil)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create user")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(r.Context(), "SELECT pg_advisory_xact_lock($1)", bootstrapAdminLock); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create user")
+		return
+	}
+
 	role := "member"
 	var count int
-	if err := s.db.DB().QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err == nil && count == 0 {
+	if err := tx.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM users").Scan(&count); err == nil && count == 0 {
 		role = "admin"
 	}
 
@@ -114,16 +141,19 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert into database
-	_, err = s.db.DB().Exec(
+	if _, err := tx.ExecContext(r.Context(),
 		"INSERT INTO users (id, email, password_hash, name, role, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
 		user.ID, user.Email, user.PasswordHash, user.Name, user.Role, user.CreatedAt, user.UpdatedAt,
-	)
-	if err != nil {
+	); err != nil {
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
 			respondError(w, http.StatusConflict, "An account with this email already exists")
 			return
 		}
+		respondError(w, http.StatusInternalServerError, "Failed to create user")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create user")
 		return
 	}
@@ -162,7 +192,7 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Find user
 	var user models.User
 	var passwordHash string
-	err := s.db.DB().QueryRow(
+	err := s.db.DB().QueryRowContext(r.Context(),
 		"SELECT id, email, password_hash, name, role, created_at, updated_at FROM users WHERE email = $1",
 		req.Email,
 	).Scan(&user.ID, &user.Email, &passwordHash, &user.Name, &user.Role, &user.CreatedAt, &user.UpdatedAt)
@@ -216,9 +246,10 @@ func parseJSON(w http.ResponseWriter, r *http.Request, v interface{}) error {
 	return dec.Decode(v)
 }
 
-// clientKey identifies the rate-limit subject for a request: the real client
-// IP when behind a trusted proxy (X-Forwarded-For set by middleware.RealIP)
-// or the connection peer otherwise.
+// clientKey identifies the rate-limit subject for a request: the connection
+// peer (r.RemoteAddr). Forwarded headers are deliberately not trusted here —
+// middleware.RealIP is not installed (see Router), so a client cannot spoof
+// its way into a fresh rate-limit bucket (audit #4).
 func clientKey(r *http.Request) string {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host

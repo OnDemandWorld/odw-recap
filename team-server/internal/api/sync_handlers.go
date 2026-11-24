@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -158,10 +157,13 @@ func (s *Server) syncHandler(w http.ResponseWriter, r *http.Request) {
 		// report a partial sync.
 		log.Printf("sync: partial sync for meeting %s: %v", meetingID, err)
 		settleQueue("failed", 1, err.Error())
+		// Audit #79: do not echo the joined error to the client — it wraps
+		// *url.Error (internal VAULT_API_URL/LOOP_API_URL) and upstream response
+		// bodies. Keep detail in the log and sync_queue.last_error only.
 		respondJSON(w, http.StatusOK, SyncResponse{
 			Status:    "partial",
 			MeetingID: meetingID,
-			Message:   fmt.Sprintf("Sync completed with errors: %v", err),
+			Message:   "Sync completed with errors; queued for retry",
 		})
 		return
 	}

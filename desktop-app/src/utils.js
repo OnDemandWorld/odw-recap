@@ -70,6 +70,22 @@
     return status === "completed";
   }
 
+  /**
+   * Decode a value read via get_config. Settings written by the Rust `set`
+   * helper are JSON-encoded (e.g. a path arrives as "\"/rec\"" and a flag as
+   * "true"), while legacy/raw writes are plain strings. Parse JSON when
+   * possible and fall back to the raw string otherwise. Returns null for
+   * null/undefined. (Audit #19: needed to resume a persisted watch folder.)
+   */
+  function parseConfigValue(raw) {
+    if (raw == null) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return raw;
+    }
+  }
+
   const api = {
     escapeHtml: escapeHtml,
     formatDuration: formatDuration,
@@ -77,6 +93,7 @@
     formatTimestamp: formatTimestamp,
     statusLabel: statusLabel,
     isReady: isReady,
+    parseConfigValue: parseConfigValue,
   };
 
   if (typeof module !== "undefined" && module.exports) {

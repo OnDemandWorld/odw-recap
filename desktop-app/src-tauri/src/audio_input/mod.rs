@@ -159,12 +159,11 @@ impl AudioInputManager {
     }
 
     pub fn validate_file(&self, path: &Path) -> Result<()> {
-        if !path.exists() {
-            return Err(RecapError::AudioInput(format!(
-                "File does not exist: {}",
-                path.display()
-            )));
-        }
+        // Audit #7: reject symlinks before any copy. Watch folders are often
+        // cloud-synced; a planted link (e.g. meeting.mp3 -> ~/.ssh/id_rsa)
+        // would otherwise have its target's bytes copied into the library and
+        // uploaded to cloud STT. symlink_metadata does not follow the link.
+        reject_symlink(path)?;
 
         if !self.is_supported_format(path) {
             return Err(RecapError::AudioInput(format!(
@@ -209,6 +208,15 @@ impl AudioInputManager {
     {
         // Stop any previous watcher first.
         self.stop_watch_folder();
+
+        // Audit #8: watching the inbox (or a folder containing/inside it) makes
+        // every import copy a new UUID file back into the watched directory,
+        // retriggering Create events in an unbounded self-import loop. Reject it.
+        if watch_conflicts_with_inbox(&watch_path, &self.inbox_path) {
+            return Err(RecapError::AudioInput(
+                "Watch folder cannot be the inbox, contain it, or live inside it (would cause an infinite self-import loop)".to_string(),
+            ));
+        }
 
         let monitor = watch_folder_monitor::WatchFolderMonitor::new(watch_path)?;
         let storage = self.storage.clone();
@@ -266,8 +274,25 @@ impl AudioInputManager {
         let url = server.upload_url();
         let token = server.token().to_string();
 
+        // Audit #9: bind synchronously so a busy port (or other bind failure)
+        // propagates to the caller now, rather than being eprintln'd inside a
+        // detached task while the UI reports a live URL for a dead server.
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let std_listener = std::net::TcpListener::bind(addr)
+            .map_err(|e| RecapError::AudioInput(format!("Failed to bind HTTP server: {}", e)))?;
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| RecapError::AudioInput(format!("Failed to configure HTTP server: {}", e)))?;
+
         let handle = tauri::async_runtime::spawn(async move {
-            if let Err(e) = server.run().await {
+            let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("HTTP upload server failed to register listener: {}", e);
+                    return;
+                }
+            };
+            if let Err(e) = server.run_with_listener(listener).await {
                 eprintln!("HTTP upload server stopped with error: {}", e);
             }
         });
@@ -314,4 +339,66 @@ pub fn get_supported_audio_formats() -> Vec<String> {
         "webm".to_string(),
         "flac".to_string(),
     ]
+}
+
+/// Audit #7: error when `path` is a symlink (or does not exist). Uses
+/// symlink_metadata so the link itself is inspected, never its target.
+fn reject_symlink(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(RecapError::AudioInput(format!(
+            "Refusing to import symlink: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(_) => Err(RecapError::AudioInput(format!(
+            "File does not exist: {}",
+            path.display()
+        ))),
+    }
+}
+
+/// Audit #8: true when watching `watch_path` would re-import the inbox's own
+/// output — i.e. the two paths are equal, or one contains the other. Compares
+/// canonical paths where possible, falling back to the lexical paths.
+fn watch_conflicts_with_inbox(watch_path: &Path, inbox_path: &Path) -> bool {
+    let w = std::fs::canonicalize(watch_path).unwrap_or_else(|_| watch_path.to_path_buf());
+    let i = std::fs::canonicalize(inbox_path).unwrap_or_else(|_| inbox_path.to_path_buf());
+    w == i || i.starts_with(&w) || w.starts_with(&i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_conflicts_detects_inbox_overlap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let other = tmp.path().join("recordings");
+        std::fs::create_dir_all(&other).unwrap();
+
+        // Same dir, ancestor of inbox, and a child of inbox all conflict.
+        assert!(watch_conflicts_with_inbox(&inbox, &inbox));
+        assert!(watch_conflicts_with_inbox(tmp.path(), &inbox));
+        let inside = inbox.join("sub");
+        std::fs::create_dir_all(&inside).unwrap();
+        assert!(watch_conflicts_with_inbox(&inside, &inbox));
+        // A separate folder is fine.
+        assert!(!watch_conflicts_with_inbox(&other, &inbox));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_symlink_blocks_links_but_allows_regular_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("secret.txt");
+        std::fs::write(&target, b"not audio").unwrap();
+        let link = tmp.path().join("meeting.mp3");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(reject_symlink(&link).is_err(), "symlink must be rejected");
+        assert!(reject_symlink(&target).is_ok(), "regular file must pass");
+        assert!(reject_symlink(&tmp.path().join("missing.mp3")).is_err());
+    }
 }

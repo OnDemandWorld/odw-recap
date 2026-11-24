@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -30,6 +31,10 @@ type Server struct {
 // SetAllowedOrigins overrides it. Authentication is bearer-token based, so no
 // ambient browser credentials are needed and AllowCredentials stays false.
 var DefaultAllowedOrigins = []string{"*"}
+
+// corsWarnOnce ensures the wildcard-origin warning is logged once (audit #76),
+// not on every Router() build (e.g. across tests).
+var corsWarnOnce sync.Once
 
 // NewServer creates a new API server. When a non-nil database is supplied the
 // PostgreSQL-backed meeting store and audit logger are wired automatically.
@@ -83,13 +88,26 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// NOTE: middleware.RealIP is intentionally NOT used. It trusts
+	// True-Client-IP / X-Real-IP / X-Forwarded-For from ANY client, which let
+	// an attacker rotate a spoofed IP header per request to bypass the login
+	// rate limiter and poison audit attribution (audit #4). The server listens
+	// directly with no trusted-proxy config, so the connection peer
+	// (r.RemoteAddr) is the authoritative client address. If a trusted reverse
+	// proxy is added later, honor forwarded headers only from its CIDR.
 	r.Use(middleware.Timeout(60 * time.Second))
 
 	// CORS. Credentials are never allowed: the API is bearer-token based and
 	// echoing arbitrary origins together with credentials would let any site
 	// make credentialed cross-origin calls (go-chi/cors mirrors the request
 	// origin when "*" is combined with AllowCredentials).
+	// Audit #76: '*' is the out-of-the-box default; warn loudly so production
+	// browser-facing deployments set an explicit ALLOWED_ORIGINS allowlist.
+	if len(s.allowedOrigins) == 1 && s.allowedOrigins[0] == "*" {
+		corsWarnOnce.Do(func() {
+			log.Printf("WARNING: CORS ALLOWED_ORIGINS is '*' (development default). Set ALLOWED_ORIGINS to an explicit origin allowlist for browser-facing production deployments.")
+		})
+	}
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   s.allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},

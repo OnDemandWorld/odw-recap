@@ -1,24 +1,27 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+# Anchor to the repo root regardless of the caller's CWD (audit #72).
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 echo "Running all tests..."
 
-# Run Rust tests
+# Run Rust tests (cargo from PATH, not a hardcoded ~/.cargo/bin/cargo).
 echo "Running Rust tests..."
-cd desktop-app/src-tauri
-~/.cargo/bin/cargo test
-cd ../..
+cd "$ROOT/desktop-app/src-tauri"
+cargo test
 
 # Run Go tests
 echo "Running Go tests..."
-cd team-server
+cd "$ROOT/team-server"
 go test ./...
-cd ..
 
-# Run frontend tests (Jest: utils unit tests + command contract tests)
+# Run frontend tests (Jest: utils unit tests + command contract tests).
+# Install deps first so a fresh clone has jest available (audit #72).
 echo "Running frontend tests..."
-cd desktop-app
+cd "$ROOT/desktop-app"
+npm ci
 npm test
-cd ..
 
 echo "All tests complete!"

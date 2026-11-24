@@ -7,7 +7,7 @@
 (function () {
   "use strict";
 
-  const { escapeHtml, formatDuration, formatTimestamp, formatBytes, statusLabel, isReady } =
+  const { escapeHtml, formatDuration, formatTimestamp, formatBytes, statusLabel, isReady, parseConfigValue } =
     window.RecapUtils;
 
   // ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@
           meetingListEl.innerHTML = hits
             .map(
               (h) =>
-                `<div class="meeting-card" data-id="${escapeHtml(h.meeting_id)}" style="cursor:pointer">` +
+                `<div class="meeting-card" data-id="${escapeHtml(h.meeting_id)}">` +
                 `<div class="snippet">…${escapeHtml(h.snippet)}…</div></div>`
             )
             .join("");
@@ -537,6 +537,26 @@
     } catch (error) {
       console.error("Failed to restore settings:", error);
     }
+
+    // Audit #19: resume a persisted watch folder so auto-import survives a
+    // restart. start_watch_folder writes watch_folder_enabled/path via the JSON
+    // `set` helper, so decode them with parseConfigValue before re-invoking.
+    try {
+      const [enabledRaw, pathRaw] = await Promise.all([
+        invoke("get_config", { key: "watch_folder_enabled" }),
+        invoke("get_config", { key: "watch_folder_path" }),
+      ]);
+      const enabled = parseConfigValue(enabledRaw) === true;
+      const watchPath = parseConfigValue(pathRaw);
+      if (enabled && watchPath) {
+        const active = await invoke("start_watch_folder", { path: watchPath });
+        const el = document.querySelector("#watch-folder-path");
+        if (el) el.value = active;
+      }
+    } catch (error) {
+      console.error("Failed to restore watch folder:", error);
+    }
+
     await refreshTeamServerStatus();
   }
 

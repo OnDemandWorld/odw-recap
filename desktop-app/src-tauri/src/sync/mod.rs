@@ -1,5 +1,4 @@
 pub mod client;
-pub mod types;
 
 use crate::error::{RecapError, Result};
 use std::sync::Arc;
@@ -45,8 +44,15 @@ impl SyncEngine {
         // previously users hit "already logged in — log out first" after the
         // 24h JWT expiry with no way to know why syncs were failing.
         let snapshot = self.lock()?.clone();
+        let target_url = snapshot.server_url().to_string();
         let token = snapshot.login(email, password).await?;
-        self.lock()?.set_token(Some(token.clone()));
+        // Audit #61: only install the token if the client still targets the same
+        // server. A concurrent reconfigure to a different server must not end up
+        // carrying server A's JWT (and meeting data) to server B.
+        let mut inner = self.lock()?;
+        if inner.server_url() == target_url {
+            inner.set_token(Some(token.clone()));
+        }
         Ok(token)
     }
 
@@ -71,13 +77,10 @@ impl SyncEngine {
         let result = snapshot
             .sync_meeting(meeting_id, meeting_data, transcript_data, summary_data)
             .await;
-        // R-9: a 401 means the JWT expired — drop it so the UI forces a fresh
-        // login instead of retrying a dead token forever (previously the stale
-        // token also BLOCKED re-login with "log out first").
-        if let Err(RecapError::Sync(msg)) = &result {
-            if msg.contains("HTTP 401") {
-                let _ = self.lock().map(|mut inner| inner.set_token(None));
-            }
+        // R-9 / audit #62: a 401 means the JWT expired — drop it so the UI forces
+        // a fresh login. Match the structural variant, not a message substring.
+        if let Err(RecapError::SyncUnauthorized) = &result {
+            let _ = self.lock().map(|mut inner| inner.set_token(None));
         }
         result
     }
